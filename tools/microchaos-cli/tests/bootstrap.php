@@ -11,8 +11,11 @@ define('WP_CLI', true);
 define('ABSPATH', '/tmp/fake-wordpress/');
 define('WP_CONTENT_DIR', ABSPATH . 'wp-content');
 
-// Define path constants that bootstrap.php normally sets
-define('MICROCHAOS_VERSION', '3.0.0-test');
+// Define path constants that bootstrap.php normally sets. The version is parsed
+// from the plugin header rather than hardcoded so tests cannot drift from the release.
+define('MICROCHAOS_PLUGIN_FILE', dirname(__DIR__) . '/microchaos-cli.php');
+preg_match('/^\s*\*\s*Version:\s*(.+?)\s*$/m', file_get_contents(MICROCHAOS_PLUGIN_FILE), $microchaos_version_match);
+define('MICROCHAOS_VERSION', $microchaos_version_match[1] ?? 'unknown');
 define('MICROCHAOS_PATH', dirname(__DIR__) . '/microchaos');
 define('MICROCHAOS_CORE_PATH', MICROCHAOS_PATH . '/core');
 

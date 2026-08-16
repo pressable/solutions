@@ -3,21 +3,29 @@
  * Plugin Name: MicroChaos CLI Load Tester
  * Description: Internal WP-CLI based WordPress load tester for staging environments where
  * external load testing is restricted (like Pressable).
- * Version: 3.0.0
+ * Version: 4.1.0
  * Author: Phill
+ * License: GPL-3.0-or-later
+ *
+ * The Version line above is the single source of truth for both the modular and
+ * bundled distributions, which parse it rather than declaring their own copy.
+ * Bump it here and nowhere else.
  */
 
 // Bootstrap MicroChaos components
 
 /**
- * COMPILED SINGLE-FILE VERSION
- * Generated on: 2025-12-18T17:59:22.949Z
+ * COMPILED SINGLE-FILE VERSION - MicroChaos 4.1.0
  * 
  * This is an automatically generated file - DO NOT EDIT DIRECTLY
- * Make changes to the modular version and rebuild.
+ * Make changes to the modular version and rebuild with: node build.js
  */
 
 if (defined('WP_CLI') && WP_CLI) {
+
+    if (!defined('MICROCHAOS_VERSION')) {
+        define('MICROCHAOS_VERSION', '4.1.0');
+    }
 
 class MicroChaos_Constants {
     /**
@@ -29,6 +37,16 @@ class MicroChaos_Constants {
      * Default timeout for parallel test execution (10 minutes in seconds)
      */
     const DEFAULT_PARALLEL_TIMEOUT = 600;
+
+    /**
+     * Default per-request timeout in seconds
+     *
+     * Every abandoned request is a censored measurement: its real duration is
+     * unknown and it leaves the timing distribution as an error. Set well above
+     * any response you would consider acceptable, so the cutoff is a backstop
+     * rather than something a struggling site hits routinely.
+     */
+    const DEFAULT_REQUEST_TIMEOUT = 30;
 
     /**
      * Default number of parallel workers
@@ -518,9 +536,7 @@ class MicroChaos_Authentication_Manager {
             return null;
         }
 
-        wp_set_current_user($user->ID);
-        wp_set_auth_cookie($user->ID);
-        $cookies = wp_remote_retrieve_cookies(wp_remote_get(home_url()));
+        $cookies = self::build_auth_cookies($user);
 
         MicroChaos_Log::log("🔐 Authenticated as {$user->user_login}");
 
@@ -543,15 +559,51 @@ class MicroChaos_Authentication_Manager {
                 continue;
             }
 
-            wp_set_current_user($user->ID);
-            wp_set_auth_cookie($user->ID);
-            $session_cookies = wp_remote_retrieve_cookies(wp_remote_get(home_url()));
-            $auth_sessions[] = $session_cookies;
+            $auth_sessions[] = self::build_auth_cookies($user);
 
             MicroChaos_Log::log("🔐 Added session for {$user->user_login}");
         }
 
         return $auth_sessions;
+    }
+
+    /**
+     * Build a session cookie jar for a user
+     *
+     * wp_set_auth_cookie() cannot be used from WP-CLI. It hands its cookies to
+     * setcookie(), which is a no-op under the CLI SAPI because there is no HTTP
+     * response for the headers to attach to, and it returns void, so the caller
+     * never sees the values either. The cookies have to be generated directly.
+     *
+     * Deliberately sets no path, domain or expiry attribute: WP_Http_Cookie
+     * passes those through to the Requests cookie jar, which filters on them
+     * before sending. Leaving them unset means the jar always sends the cookie,
+     * which is what a load test wants.
+     *
+     * @param WP_User $user User to open a session for
+     * @return array Array of WP_Http_Cookie objects for wp_remote_request()
+     */
+    private static function build_auth_cookies(WP_User $user): array {
+        $expiration = time() + DAY_IN_SECONDS;
+        $token = WP_Session_Tokens::get_instance($user->ID)->create($expiration);
+
+        // The receiving web request chooses between AUTH_COOKIE and
+        // SECURE_AUTH_COOKIE using its own is_ssl(), which this CLI process
+        // can't observe. Predict it from the site URL scheme instead.
+        $is_https = 'https' === wp_parse_url(home_url(), PHP_URL_SCHEME);
+
+        return [
+            new WP_Http_Cookie([
+                'name' => $is_https ? SECURE_AUTH_COOKIE : AUTH_COOKIE,
+                'value' => wp_generate_auth_cookie($user->ID, $expiration, $is_https ? 'secure_auth' : 'auth', $token),
+            ]),
+            // Front-end logged-in state is validated from this one, so it is
+            // the cookie that makes a cache-bypassed request actually bypass.
+            new WP_Http_Cookie([
+                'name' => LOGGED_IN_COOKIE,
+                'value' => wp_generate_auth_cookie($user->ID, $expiration, 'logged_in', $token),
+            ]),
+        ];
     }
 
     // ==================== HTTP Basic Authentication ====================
@@ -1189,6 +1241,16 @@ class MicroChaos_Integration_Logger {
 
 class MicroChaos_Request_Generator {
     /**
+     * Status sentinel for a request abandoned at the timeout
+     */
+    const STATUS_TIMEOUT = 'TIMEOUT';
+
+    /**
+     * Status sentinel for a request that failed for any other reason
+     */
+    const STATUS_ERROR = 'ERROR';
+
+    /**
      * Collect and process cache headers
      *
      * @var bool
@@ -1210,6 +1272,13 @@ class MicroChaos_Request_Generator {
     private array $last_request_cache_headers = [];
 
     /**
+     * Seconds to wait for a response before abandoning the request
+     *
+     * @var int
+     */
+    private int $timeout = MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT;
+
+    /**
      * Constructor
      *
      * @param array<string, mixed> $options Options for the request generator
@@ -1217,6 +1286,19 @@ class MicroChaos_Request_Generator {
     public function __construct(array $options = []) {
         $this->collect_cache_headers = isset($options['collect_cache_headers']) ?
             $options['collect_cache_headers'] : false;
+
+        if (isset($options['timeout'])) {
+            $this->timeout = max(1, (int) $options['timeout']);
+        }
+    }
+
+    /**
+     * Get the configured request timeout
+     *
+     * @return int Timeout in seconds
+     */
+    public function get_timeout(): int {
+        return $this->timeout;
     }
 
     /**
@@ -1270,7 +1352,7 @@ class MicroChaos_Request_Generator {
         for ($i = 0; $i < $current_burst; $i++) {
             $curl = curl_init($url);
             curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+            curl_setopt($curl, CURLOPT_TIMEOUT, $this->timeout);
             curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
             
             // Prepare headers array
@@ -1329,7 +1411,7 @@ class MicroChaos_Request_Generator {
             $end = microtime(true);
             $duration = round($end - $start, 4);
             $info = curl_getinfo($curl);
-            $code = $info['http_code'] ?: 'ERROR';
+            $code = $info['http_code'] ?: self::classify_curl_failure(curl_errno($curl));
 
             // Extract body for GraphQL error detection
             // Note: CURLOPT_HEADER is only set when collect_cache_headers is enabled
@@ -1388,7 +1470,7 @@ class MicroChaos_Request_Generator {
         $start = microtime(true);
 
         $args = [
-            'timeout' => 10,
+            'timeout' => $this->timeout,
             'blocking' => true,
             'user-agent' => $this->get_user_agent(),
             'method' => $method,
@@ -1427,7 +1509,7 @@ class MicroChaos_Request_Generator {
 
         $duration = round($end - $start, 4);
         $code = is_wp_error($response)
-            ? 'ERROR'
+            ? self::classify_wp_error($response)
             : wp_remote_retrieve_response_code($response);
 
         // Get response body for GraphQL error detection
@@ -1462,6 +1544,40 @@ class MicroChaos_Request_Generator {
             'code' => $code,
             'graphql_errors' => $graphql_errors,
         ];
+    }
+
+    /**
+     * Classify a cURL failure
+     *
+     * A timeout and a refused connection are different findings — one says the
+     * site is slow, the other says it is unreachable — so they get separate
+     * sentinels rather than sharing 'ERROR'.
+     *
+     * @param int $errno cURL error number from curl_errno()
+     * @return string Status sentinel for the result row
+     */
+    private static function classify_curl_failure(int $errno): string {
+        return CURLE_OPERATION_TIMEOUTED === $errno
+            ? self::STATUS_TIMEOUT
+            : self::STATUS_ERROR;
+    }
+
+    /**
+     * Classify a WP_Error returned by wp_remote_request()
+     *
+     * WordPress collapses every transport failure into the single error code
+     * 'http_request_failed', so the message is the only place the cause
+     * survives. cURL phrases it "Operation timed out after N milliseconds" and
+     * the streams transport "Connection timed out", hence matching on the
+     * shared substring.
+     *
+     * @param WP_Error $error Error from wp_remote_request()
+     * @return string Status sentinel for the result row
+     */
+    private static function classify_wp_error($error): string {
+        return false !== stripos($error->get_error_message(), 'timed out')
+            ? self::STATUS_TIMEOUT
+            : self::STATUS_ERROR;
     }
 
     /**
@@ -1711,7 +1827,15 @@ class MicroChaos_Resource_Monitor {
     }
 
     /**
-     * Log current resource utilization
+     * Log current resource utilization of the load generator process
+     *
+     * Everything here describes the WP-CLI process firing the requests, not the
+     * PHP-FPM worker serving them. They are separate OS processes and nothing
+     * here reaches across that boundary.
+     *
+     * Note that getrusage() returns CUMULATIVE CPU time for the process, so
+     * user_time and system_time rise monotonically across samples. Only the
+     * newest sample is meaningful on its own.
      *
      * @return array Current resource usage data
      */
@@ -1722,8 +1846,11 @@ class MicroChaos_Resource_Monitor {
         $user_time = round($ru['ru_utime.tv_sec'] + $ru['ru_utime.tv_usec'] / 1e6, 2);
         $system_time = round($ru['ru_stime.tv_sec'] + $ru['ru_stime.tv_usec'] / 1e6, 2);
 
+        $now = microtime(true);
+        $elapsed = round($now - $this->start_time, 4);
+
         if (class_exists('WP_CLI')) {
-            MicroChaos_Log::log("🔍 Resources: Memory Usage: {$memory_usage} MB, Peak Memory: {$peak_memory} MB, CPU Time: User {$user_time}s, System {$system_time}s");
+            MicroChaos_Log::log("🔍 Load generator: Memory {$memory_usage} MB, Peak {$peak_memory} MB, CPU {$user_time}s user + {$system_time}s system over {$elapsed}s");
         }
 
         $result = [
@@ -1731,16 +1858,52 @@ class MicroChaos_Resource_Monitor {
             'peak_memory'  => $peak_memory,
             'user_time'    => $user_time,
             'system_time'  => $system_time,
+            // Always recorded, not just for trends: turning the cumulative CPU
+            // counter into a rate needs a denominator.
+            'elapsed'      => $elapsed,
         ];
-        
-        // Add timestamp for trend tracking
+
         if ($this->track_trends) {
-            $result['timestamp'] = microtime(true);
-            $result['elapsed'] = round($result['timestamp'] - $this->start_time, 2);
+            $result['timestamp'] = $now;
         }
 
         $this->resource_results[] = $result;
         return $result;
+    }
+
+    /**
+     * Average CPU cores consumed by the load generator itself
+     *
+     * MicroChaos runs on the same container as the site under test, so the CPU
+     * it burns is inside whatever per-site figure the observability dashboard
+     * reports for the same window. Phase 4 divides RPS by that figure, so any
+     * generator overhead left in it understates requests-per-worker and
+     * oversizes the recommendation.
+     *
+     * getrusage() is cumulative, so the newest sample carries the total; divide
+     * by elapsed wall time to get a rate comparable with a dashboard reading.
+     *
+     * @return array{cpu_seconds: float, elapsed: float, cores: float}|null Null when there is nothing to derive from
+     */
+    private function generator_cpu_usage(): ?array {
+        if (empty($this->resource_results)) {
+            return null;
+        }
+
+        $latest = $this->resource_results[array_key_last($this->resource_results)];
+        $elapsed = $latest['elapsed'] ?? 0;
+
+        if ($elapsed <= 0) {
+            return null;
+        }
+
+        $cpu_seconds = $latest['user_time'] + $latest['system_time'];
+
+        return [
+            'cpu_seconds' => round($cpu_seconds, 2),
+            'elapsed'     => round($elapsed, 2),
+            'cores'       => round($cpu_seconds / $elapsed, 3),
+        ];
     }
 
     /**
@@ -1814,6 +1977,10 @@ class MicroChaos_Resource_Monitor {
                 'min' => round(min($system_times), 2),
                 'max' => round(max($system_times), 2),
             ],
+            // The only figure here that is useful outside this process: what the
+            // generator cost the container, so it can be taken back out of the
+            // dashboard CPU reading Phase 4 sizes from.
+            'generator_cpu' => $this->generator_cpu_usage(),
         ];
     }
 
@@ -1832,17 +1999,24 @@ class MicroChaos_Resource_Monitor {
         }
 
         if (class_exists('WP_CLI')) {
-            // Format memory with threshold colors
-            $avg_mem_formatted = MicroChaos_Thresholds::format_value($summary['memory']['avg'], 'memory_usage', $threshold_profile);
-            $max_mem_formatted = MicroChaos_Thresholds::format_value($summary['memory']['max'], 'memory_usage', $threshold_profile);
-            $avg_peak_formatted = MicroChaos_Thresholds::format_value($summary['peak_memory']['avg'], 'memory_usage', $threshold_profile);
-            $max_peak_formatted = MicroChaos_Thresholds::format_value($summary['peak_memory']['max'], 'memory_usage', $threshold_profile);
-            
-            MicroChaos_Log::log("📊 Resource Utilization Summary:");
-            MicroChaos_Log::log("   Memory Usage: Avg: {$avg_mem_formatted}, Median: {$summary['memory']['median']} MB, Min: {$summary['memory']['min']} MB, Max: {$max_mem_formatted}");
-            MicroChaos_Log::log("   Peak Memory: Avg: {$avg_peak_formatted}, Median: {$summary['peak_memory']['median']} MB, Min: {$summary['peak_memory']['min']} MB, Max: {$max_peak_formatted}");
-            MicroChaos_Log::log("   CPU Time (User): Avg: {$summary['user_time']['avg']}s, Median: {$summary['user_time']['median']}s, Min: {$summary['user_time']['min']}s, Max: {$summary['user_time']['max']}s");
-            MicroChaos_Log::log("   CPU Time (System): Avg: {$summary['system_time']['avg']}s, Median: {$summary['system_time']['median']}s, Min: {$summary['system_time']['min']}s, Max: {$summary['system_time']['max']}s");
+            // Memory is deliberately uncoloured. format_value() scores it against
+            // ini_get('memory_limit') for the CLI process, which is the wrong
+            // limit for a web worker and is usually -1 here — in which case
+            // get_php_memory_limit_mb() substitutes 128MB and every reading goes
+            // red against a number that doesn't exist.
+            MicroChaos_Log::log("📊 Load Generator Resource Usage (the WP-CLI process, NOT the site):");
+            MicroChaos_Log::log("   Memory Usage: Avg: {$summary['memory']['avg']} MB, Median: {$summary['memory']['median']} MB, Min: {$summary['memory']['min']} MB, Max: {$summary['memory']['max']} MB");
+            MicroChaos_Log::log("   Peak Memory: Avg: {$summary['peak_memory']['avg']} MB, Median: {$summary['peak_memory']['median']} MB, Min: {$summary['peak_memory']['min']} MB, Max: {$summary['peak_memory']['max']} MB");
+            MicroChaos_Log::log("   ⚠ Worker RAM cannot be sized from these. They describe the process");
+            MicroChaos_Log::log("     sending the requests; take per-worker memory from the dashboard.");
+
+            $generator_cpu = $summary['generator_cpu'] ?? null;
+            if ($generator_cpu) {
+                MicroChaos_Log::log("   Generator CPU: {$generator_cpu['cores']} cores avg ({$generator_cpu['cpu_seconds']}s CPU over {$generator_cpu['elapsed']}s wall)");
+                MicroChaos_Log::log("     This runs on the site's own container, so it is included in the");
+                MicroChaos_Log::log("     dashboard's per-site CPU. Subtract it before dividing RPS by CPU,");
+                MicroChaos_Log::log("     or the worker count comes out high.");
+            }
             
             // Add comparison with baseline if provided
             if ($baseline) {
@@ -1878,7 +2052,7 @@ class MicroChaos_Resource_Monitor {
                     'MaxPeak' => $summary['peak_memory']['max'],
                 ];
                 
-                $chart = MicroChaos_Thresholds::generate_chart($chart_data, "Memory Usage (MB)");
+                $chart = MicroChaos_Thresholds::generate_chart($chart_data, "Load Generator Memory (MB)");
                 MicroChaos_Log::log($chart);
             }
         }
@@ -2188,7 +2362,7 @@ class MicroChaos_Resource_Monitor {
         $trends = $this->analyze_trends();
         
         if (class_exists('WP_CLI')) {
-            MicroChaos_Log::log("\n📈 Resource Trend Analysis:");
+            MicroChaos_Log::log("\n📈 Load Generator Trend Analysis (the WP-CLI process, NOT the site):");
             MicroChaos_Log::log("   Data Points: {$trends['data_points']} over {$trends['time_span']} seconds");
             
             // Memory usage trends
@@ -2205,9 +2379,11 @@ class MicroChaos_Resource_Monitor {
             MicroChaos_Log::log("   Peak Memory: {$peak_color}{$peak_direction}{$peak_change}%\033[0m over test duration");
             MicroChaos_Log::log("   Pattern: " . ucfirst(str_replace('_', ' ', $trends['peak_memory']['pattern'])));
             
-            // Warning about unbounded growth if detected
+            // Growth here is the generator accumulating its own results array as
+            // the run gets longer. It is a function of test duration, not site
+            // health, so it must not be reported as a leak.
             if ($trends['potentially_unbounded']) {
-                MicroChaos_Log::warning("⚠️ Potential memory leak detected! Resource usage shows continuous growth pattern.");
+                MicroChaos_Log::log("   Note: generator memory grows with run length because it accumulates its own results. Expected — not a signal about the site.");
             }
             
             // Generate visual trend charts
@@ -2236,8 +2412,11 @@ class MicroChaos_Cache_Analyzer {
      * Process cache headers from response
      *
      * @param array<string, string> $headers Response headers
+     * @param int                   $count   How many requests these headers represent.
+     *                                       Callers that have already aggregated a batch
+     *                                       pass the batch count; a single response passes 1.
      */
-    public function collect_headers(array $headers): void {
+    public function collect_headers(array $headers, int $count = 1): void {
         // Headers to track (Pressable specific and general cache headers)
         $cache_header_names = ['x-ac', 'x-nananana', 'x-cache', 'age', 'x-cache-hits'];
 
@@ -2250,7 +2429,7 @@ class MicroChaos_Cache_Analyzer {
                 if (!isset($this->cache_headers[$header][$value])) {
                     $this->cache_headers[$header][$value] = 0;
                 }
-                $this->cache_headers[$header][$value]++;
+                $this->cache_headers[$header][$value] += $count;
             }
         }
     }
@@ -2457,6 +2636,7 @@ class MicroChaos_Reporting_Engine {
                 'graphql_errors' => 0,
                 'graphql_error_requests' => 0,
                 'error_rate' => 0,
+                'status_codes' => [],
                 'timing' => [
                     'avg' => 0,
                     'median' => 0,
@@ -2475,8 +2655,10 @@ class MicroChaos_Reporting_Engine {
         $min = round(min($times), 4);
         $max = round(max($times), 4);
 
-        $successes = count(array_filter($this->results, fn($r) => $r['code'] === 200));
+        $successes = count(array_filter($this->results, fn($r) => self::is_success_code($r['code'])));
         $http_errors = $count - $successes;
+
+        $status_codes = $this->tally_status_codes();
 
         // Count GraphQL errors (requests that returned 200 but had errors in response)
         $graphql_errors = array_sum(array_map(
@@ -2494,11 +2676,12 @@ class MicroChaos_Reporting_Engine {
 
         return [
             'count' => $count,
-            'success' => $successes - $requests_with_gql_errors, // True success = HTTP 200 AND no GQL errors
+            'success' => $successes - $requests_with_gql_errors, // True success = non-error HTTP status AND no GQL errors
             'http_errors' => $http_errors,
             'graphql_errors' => $graphql_errors,
             'graphql_error_requests' => $requests_with_gql_errors,
             'error_rate' => $error_rate,
+            'status_codes' => $status_codes,
             'timing' => [
                 'avg' => $avg,
                 'median' => $median,
@@ -2506,6 +2689,57 @@ class MicroChaos_Reporting_Engine {
                 'max' => $max,
             ],
         ];
+    }
+
+    /**
+     * Decide whether a response status counts as a success
+     *
+     * 2xx and 3xx both mean the origin handled the request. A redirect is a
+     * normal answer from a lot of the endpoints most worth load testing — an
+     * empty cart returning 302 from /checkout/ is correct behaviour, not a
+     * failure — so only 4xx and 5xx are errors.
+     *
+     * The code arrives as an int from the cURL batch path and, depending on the
+     * transport, can arrive as a numeric string from wp_remote_request(). Both
+     * are accepted. The 'ERROR' sentinel used for a failed request is not
+     * numeric, so it falls through to false.
+     *
+     * @param mixed $code Status code from a result row
+     * @return bool True when the request should count as a success
+     */
+    private static function is_success_code($code): bool {
+        if (!is_numeric($code)) {
+            return false;
+        }
+
+        $code = (int) $code;
+
+        return $code >= 200 && $code < 400;
+    }
+
+    /**
+     * Count how many times each status code came back
+     *
+     * Reported alongside the error rate so a redirect-heavy or error-heavy path
+     * identifies itself, rather than disappearing into a single bucket.
+     *
+     * Keys are whatever the transport reported: an int for a real status code
+     * (PHP coerces numeric keys), the string 'ERROR' for a request that never
+     * completed.
+     *
+     * @return array<int|string, int> Status code => count, ordered most frequent first
+     */
+    private function tally_status_codes(): array {
+        $tally = [];
+
+        foreach ($this->results as $result) {
+            $code = $result['code'];
+            $tally[$code] = ($tally[$code] ?? 0) + 1;
+        }
+
+        arsort($tally);
+
+        return $tally;
     }
 
     /**
@@ -2539,15 +2773,22 @@ class MicroChaos_Reporting_Engine {
                 MicroChaos_Log::log("     Ended:      {$execution_metrics['ended_at']}");
                 MicroChaos_Log::log("     Duration:   {$execution_metrics['duration_seconds']}s ({$execution_metrics['duration_formatted']})");
                 MicroChaos_Log::log("     Requests:   {$execution_metrics['total_requests']}");
-                MicroChaos_Log::log("     Throughput: {$execution_metrics['throughput_rps']} req/s");
+                MicroChaos_Log::log("     Throughput: {$execution_metrics['throughput_rps']} req/s (wall clock, includes --delay pacing)");
+
+                if (isset($execution_metrics['serial_ceiling_rps'])) {
+                    MicroChaos_Log::log("     Serial ceiling: {$execution_metrics['serial_ceiling_rps']} req/s (response time only — what one request at a time costs)");
+                    MicroChaos_Log::log("       {$execution_metrics['pacing_share_pct']}% of the run was pacing and overhead, not waiting on responses.");
+                }
 
                 if (isset($execution_metrics['capacity'])) {
                     MicroChaos_Log::log("");
-                    MicroChaos_Log::log("   Capacity Projection (at current throughput):");
+                    MicroChaos_Log::log("   Single-Worker Capacity (projected from the serial ceiling):");
                     MicroChaos_Log::log("     Per hour:   " . number_format($execution_metrics['capacity']['per_hour']) . " requests");
                     MicroChaos_Log::log("     Per day:    " . number_format($execution_metrics['capacity']['per_day']) . " requests");
                     MicroChaos_Log::log("     Per month:  ~" . $this->format_large_number($execution_metrics['capacity']['per_month']) . " requests");
-                    MicroChaos_Log::log("     ⚠️  Assumes sustained throughput. Actual capacity depends on workers, RAM, cache hit rate.");
+                    MicroChaos_Log::log("     ⚠️  This is ONE worker serving requests back-to-back with no cache hits");
+                    MicroChaos_Log::log("        and no idle time. It is a sizing input, not a capacity estimate —");
+                    MicroChaos_Log::log("        real capacity scales with worker count and cache hit rate.");
                 }
                 MicroChaos_Log::log("   ═══════════════════════════════════════════════════");
                 MicroChaos_Log::log("");
@@ -2565,6 +2806,17 @@ class MicroChaos_Reporting_Engine {
             }
             $error_parts[] = "Error Rate: {$error_formatted}";
             MicroChaos_Log::log("     " . implode(" | ", $error_parts));
+
+            // Show the distribution whenever it isn't a single uniform code, so
+            // a run carrying redirects says so instead of leaving the operator
+            // to infer it from the gap between total and success.
+            if (!empty($summary['status_codes']) && count($summary['status_codes']) > 1) {
+                $code_parts = [];
+                foreach ($summary['status_codes'] as $code => $code_count) {
+                    $code_parts[] = "{$code}: {$code_count}";
+                }
+                MicroChaos_Log::log("     Status Codes: " . implode(" | ", $code_parts));
+            }
             
             // Format with threshold colors
             $avg_time_formatted = MicroChaos_Thresholds::format_value($summary['timing']['avg'], 'response_time', $threshold_profile);
@@ -2730,6 +2982,7 @@ class MicroChaos_LoadTest_Orchestrator {
             'body' => null,
             'user_agent' => null,
             'warm_cache' => false,
+            'cache_bust' => false,
             'flush_between' => false,
             'rampup' => false,
             'auth_user' => null,
@@ -2737,6 +2990,7 @@ class MicroChaos_LoadTest_Orchestrator {
             'custom_cookies' => null,
             'custom_headers' => null,
             'rotation_mode' => 'serial',
+            'timeout' => MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT,
             'resource_logging' => false,
             'resource_trends' => false,
             'collect_cache_headers' => false,
@@ -2777,6 +3031,7 @@ class MicroChaos_LoadTest_Orchestrator {
         // Initialize components
         $request_generator = new MicroChaos_Request_Generator([
             'collect_cache_headers' => $config['collect_cache_headers'],
+            'timeout' => $config['timeout'],
         ]);
 
         $resource_monitor = new MicroChaos_Resource_Monitor([
@@ -2832,8 +3087,17 @@ class MicroChaos_LoadTest_Orchestrator {
         // Log test start
         $this->log_test_start($config, $endpoint_list, $integration_logger);
 
+        // Announce the measurement mode: the two modes answer different questions
+        // and the numbers are not comparable, so the log has to say which ran.
+        if ($config['cache_bust']) {
+            MicroChaos_Log::log("🚫 Cache busting enabled — every request gets a unique URL, so this measures origin cost, not cache performance.");
+        }
+
         // Warm cache if specified
         if ($config['warm_cache']) {
+            if ($config['cache_bust']) {
+                MicroChaos_Log::warning("--warm-cache does nothing alongside --cache-bust: the test requests use unique URLs, so nothing warmed here is ever reused.");
+            }
             MicroChaos_Log::log("🧤 Warming cache...");
             foreach ($endpoint_list as $endpoint_item) {
                 $request_generator->fire_request(
@@ -2864,7 +3128,8 @@ class MicroChaos_LoadTest_Orchestrator {
         $execution_metrics = $this->build_execution_metrics(
             $loop_result['test_start_timestamp'],
             $loop_result['test_end_timestamp'],
-            $loop_result['completed']
+            $loop_result['completed'],
+            $reporting_engine->get_results()
         );
 
         // Handle baseline comparison
@@ -2893,6 +3158,8 @@ class MicroChaos_LoadTest_Orchestrator {
 
         // Display reports
         $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
+
+        $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
 
         if ($config['resource_logging']) {
             $resource_monitor->report_summary($resource_baseline, null, $use_thresholds);
@@ -2936,6 +3203,35 @@ class MicroChaos_LoadTest_Orchestrator {
             'run_by_duration' => $loop_result['run_by_duration'],
             'actual_minutes' => $loop_result['actual_minutes'],
         ];
+    }
+
+    /**
+     * Warn that the timing distribution is right-censored, if any request timed out
+     *
+     * A timed-out request is not a slow measurement, it is an absent one: its
+     * real duration is unknown and the recorded time is just the cutoff. That
+     * makes the reported average and maximum look *better* as the site gets
+     * worse, because the slowest responses leave the timing set and reappear as
+     * errors. Worth saying out loud, since the summary otherwise presents
+     * timings that are quietly conditional on the requests that finished.
+     *
+     * @param MicroChaos_Reporting_Engine $reporting_engine Completed results
+     * @param int $timeout Configured timeout in seconds
+     */
+    private function report_timeout_censoring(MicroChaos_Reporting_Engine $reporting_engine, int $timeout): void {
+        $timeouts = count(array_filter(
+            $reporting_engine->get_results(),
+            static fn($result) => MicroChaos_Request_Generator::STATUS_TIMEOUT === $result['code']
+        ));
+
+        if (0 === $timeouts) {
+            return;
+        }
+
+        MicroChaos_Log::warning("⏱ {$timeouts} request(s) hit the {$timeout}s timeout and were abandoned.");
+        MicroChaos_Log::warning("   Their real response times are unknown, so the timings above are the");
+        MicroChaos_Log::warning("   requests that finished — average and max both read low. Re-run with a");
+        MicroChaos_Log::warning("   higher --timeout to see the tail before drawing conclusions from it.");
     }
 
     /**
@@ -3032,6 +3328,20 @@ class MicroChaos_LoadTest_Orchestrator {
         }
 
         return $cookies;
+    }
+
+    /**
+     * Append a unique query parameter so the request cannot be served from cache
+     *
+     * Uses a UUID rather than a counter because the page and edge caches outlive
+     * the process: a sequence restarting at 1 on every run would hit entries the
+     * previous run created.
+     *
+     * @param string $url URL to make unique
+     * @return string URL with a cache-busting parameter appended
+     */
+    private function apply_cache_buster(string $url): string {
+        return add_query_arg('mc_cb', wp_generate_uuid4(), $url);
     }
 
     /**
@@ -3176,7 +3486,9 @@ class MicroChaos_LoadTest_Orchestrator {
                     $selected = $endpoint_list[$endpoint_index % count($endpoint_list)];
                     $endpoint_index++;
                 }
-                $burst_urls[] = $selected['url'];
+                $burst_urls[] = $config['cache_bust']
+                    ? $this->apply_cache_buster($selected['url'])
+                    : $selected['url'];
             }
 
             // Fire requests
@@ -3202,12 +3514,14 @@ class MicroChaos_LoadTest_Orchestrator {
                 }
             }
 
-            // Process cache headers
+            // Process cache headers. The generator has already tallied this burst
+            // per header value, so forward the tally — collecting each distinct
+            // value once would flatten the distribution to one hit per value.
             if ($config['collect_cache_headers']) {
                 $cache_headers = $request_generator->get_cache_headers();
                 foreach ($cache_headers as $header => $values) {
                     foreach ($values as $value => $header_count) {
-                        $cache_analyzer->collect_headers([$header => $value]);
+                        $cache_analyzer->collect_headers([$header => $value], $header_count);
                     }
                 }
                 $request_generator->reset_cache_headers();
@@ -3265,14 +3579,40 @@ class MicroChaos_LoadTest_Orchestrator {
     /**
      * Build execution metrics
      *
-     * @param float $start_timestamp
-     * @param float $end_timestamp
-     * @param int $completed
+     * Two throughput figures, because they answer different questions and only
+     * one of them is a property of the site.
+     *
+     * Wall-clock RPS counts the --delay sleeps between bursts as though they
+     * were work, so it moves when the operator changes pacing flags and two
+     * runs against an identical site disagree. It is still the right figure to
+     * pair with a dashboard CPU reading, which covers the same window.
+     *
+     * The serial ceiling divides by time actually spent waiting on responses.
+     * That is what one request-at-a-time costs this site, independent of how
+     * the run was paced, and it is the honest basis for projecting forward.
+     *
+     * @param float $start_timestamp Wall-clock start
+     * @param float $end_timestamp Wall-clock end
+     * @param int $completed Requests completed
+     * @param array<int, array<string, mixed>> $results Result rows, for their recorded response times
      * @return array Execution metrics
      */
-    private function build_execution_metrics(float $start_timestamp, float $end_timestamp, int $completed): array {
+    private function build_execution_metrics(float $start_timestamp, float $end_timestamp, int $completed, array $results = []): array {
         $duration = $end_timestamp - $start_timestamp;
         $rps = $duration > 0 ? round($completed / $duration, 2) : 0;
+
+        $response_time_total = (float) array_sum(array_column($results, 'time'));
+        $serial_ceiling_rps = $response_time_total > 0
+            ? round($completed / $response_time_total, 2)
+            : 0.0;
+
+        // How much of the run was pacing rather than requests. Makes the gap
+        // between the two throughput figures self-explanatory. Clamped at zero
+        // because rounding can put recorded response time marginally above the
+        // wall clock, and a negative share would be nonsense to print.
+        $pacing_share_pct = $duration > 0
+            ? max(0.0, round((($duration - $response_time_total) / $duration) * 100, 1))
+            : 0.0;
 
         return [
             'started_at' => date('Y-m-d H:i:s', (int)$start_timestamp),
@@ -3283,10 +3623,15 @@ class MicroChaos_LoadTest_Orchestrator {
             'duration_formatted' => $this->format_duration($duration),
             'total_requests' => $completed,
             'throughput_rps' => $rps,
+            'serial_ceiling_rps' => $serial_ceiling_rps,
+            'response_time_total' => round($response_time_total, 2),
+            'pacing_share_pct' => $pacing_share_pct,
+            // Projected from the serial ceiling, not wall-clock throughput, so
+            // the figure describes the site rather than the chosen --delay.
             'capacity' => [
-                'per_hour' => (int)($rps * 3600),
-                'per_day' => (int)($rps * 86400),
-                'per_month' => (int)($rps * 2592000),
+                'per_hour' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_HOUR),
+                'per_day' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_DAY),
+                'per_month' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_DAY * 30),
             ],
         ];
     }
@@ -3409,6 +3754,11 @@ class MicroChaos_Commands {
      * [--warm-cache]
      * : Fires a single warm-up request before the test to prime caches.
      *
+     * [--cache-bust]
+     * : Append a unique query parameter to every request so page and edge caches
+     *   always miss. Required when measuring what the origin actually costs, since
+     *   without it a cacheable URL re-serves a cached response and PHP never runs.
+     *
      * [--flush-between]
      * : Calls wp_cache_flush() before each burst to simulate cold cache conditions.
      *
@@ -3437,11 +3787,26 @@ class MicroChaos_Commands {
      * [--rampup]
      * : Gradually increase the number of concurrent requests from 1 up to the burst limit.
      *
+     * [--timeout=<seconds>]
+     * : Seconds to wait for a response before abandoning the request. Default: 30.
+     *   Raise it when testing a slow endpoint. A request that times out is not
+     *   recorded as slow, it is recorded as an error and drops out of the timing
+     *   distribution — so a cutoff set too low makes average and max response time
+     *   improve as the site degrades.
+     *
      * [--resource-logging]
-     * : Log resource utilization during the test.
+     * : Log resource utilization of the load generator — the WP-CLI process sending
+     *   the requests, not the PHP-FPM worker serving them. Those are separate OS
+     *   processes and nothing here measures across the boundary, so worker RAM
+     *   cannot be sized from this output; take that from your host's metrics. What
+     *   is useful is the derived generator CPU, which runs on the same container as
+     *   the site and should be subtracted from any per-site CPU reading taken
+     *   during the test.
      *
      * [--resource-trends]
-     * : Track and analyze resource utilization trends over time. Useful for detecting memory leaks.
+     * : Track the load generator's resource usage over the run. This will not find
+     *   a leak in the site: it watches the generator, whose memory grows with test
+     *   duration because it accumulates its own results.
      *
      * [--cache-headers]
      * : Collect and analyze Pressable-specific cache headers (x-ac for Edge Cache, x-nananana for Batcache).
@@ -3487,6 +3852,11 @@ class MicroChaos_Commands {
      *     # Load test with ramp-up
      *     wp microchaos loadtest --endpoint=shop --count=100 --rampup
      *
+     *     # Measure a cacheable page twice: what visitors get, then what the origin costs.
+     *     # Run the pair — neither number answers the question on its own.
+     *     wp microchaos loadtest --endpoint=home --duration=2 --warm-cache
+     *     wp microchaos loadtest --endpoint=home --duration=2 --cache-bust
+     *
      *     # Test a POST endpoint with form data
      *     wp microchaos loadtest --endpoint=custom:/wp-json/api/v1/orders --count=20 --method=POST --body="product_id=123&quantity=1"
      *
@@ -3517,8 +3887,13 @@ class MicroChaos_Commands {
      *     # Run load test for a specific duration
      *     wp microchaos loadtest --endpoint=home --duration=5 --burst=10
      *
-     *     # Run load test with resource trend tracking to detect memory leaks
-     *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging --resource-trends
+     *     # Measure what the load generator itself costs the container, so it can be
+     *     # subtracted from the per-site CPU reading before sizing workers from it.
+     *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging
+     *
+     *     # Give a slow endpoint room to answer, so the tail is measured rather
+     *     # than cut off and recounted as an error.
+     *     wp microchaos loadtest --endpoint=custom:/checkout/ --duration=5 --timeout=60
      *
      *     # Auto-calibrate thresholds based on site's current performance
      *     wp microchaos loadtest --endpoint=home --count=50 --auto-thresholds
@@ -3589,6 +3964,7 @@ class MicroChaos_Commands {
             'body' => $assoc_args['body'] ?? null,
             'user_agent' => $assoc_args['user-agent'] ?? null,
             'warm_cache' => isset($assoc_args['warm-cache']),
+            'cache_bust' => isset($assoc_args['cache-bust']),
             'flush_between' => isset($assoc_args['flush-between']),
             'rampup' => isset($assoc_args['rampup']),
             'auth_user' => $assoc_args['auth'] ?? null,
@@ -3596,6 +3972,7 @@ class MicroChaos_Commands {
             'custom_cookies' => $assoc_args['cookie'] ?? null,
             'custom_headers' => $assoc_args['header'] ?? null,
             'rotation_mode' => $assoc_args['rotation-mode'] ?? 'serial',
+            'timeout' => intval($assoc_args['timeout'] ?? MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT),
             'resource_logging' => isset($assoc_args['resource-logging']),
             'resource_trends' => isset($assoc_args['resource-trends']),
             'collect_cache_headers' => isset($assoc_args['cache-headers']),
