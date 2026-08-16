@@ -1,0 +1,8 @@
+# OS and editor noise only.
+# Tool-specific ignores belong in that tool's own directory, so each subtree
+# stays self-contained and can be pulled or pushed independently.
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
