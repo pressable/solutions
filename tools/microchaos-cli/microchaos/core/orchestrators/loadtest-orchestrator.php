@@ -525,12 +525,14 @@ class MicroChaos_LoadTest_Orchestrator {
                 }
             }
 
-            // Process cache headers
+            // Process cache headers. The generator has already tallied this burst
+            // per header value, so forward the tally — collecting each distinct
+            // value once would flatten the distribution to one hit per value.
             if ($config['collect_cache_headers']) {
                 $cache_headers = $request_generator->get_cache_headers();
                 foreach ($cache_headers as $header => $values) {
                     foreach ($values as $value => $header_count) {
-                        $cache_analyzer->collect_headers([$header => $value]);
+                        $cache_analyzer->collect_headers([$header => $value], $header_count);
                     }
                 }
                 $request_generator->reset_cache_headers();
