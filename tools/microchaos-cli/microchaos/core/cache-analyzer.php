@@ -32,8 +32,11 @@ class MicroChaos_Cache_Analyzer {
      * Process cache headers from response
      *
      * @param array<string, string> $headers Response headers
+     * @param int                   $count   How many requests these headers represent.
+     *                                       Callers that have already aggregated a batch
+     *                                       pass the batch count; a single response passes 1.
      */
-    public function collect_headers(array $headers): void {
+    public function collect_headers(array $headers, int $count = 1): void {
         // Headers to track (Pressable specific and general cache headers)
         $cache_header_names = ['x-ac', 'x-nananana', 'x-cache', 'age', 'x-cache-hits'];
 
@@ -46,7 +49,7 @@ class MicroChaos_Cache_Analyzer {
                 if (!isset($this->cache_headers[$header][$value])) {
                     $this->cache_headers[$header][$value] = 0;
                 }
-                $this->cache_headers[$header][$value]++;
+                $this->cache_headers[$header][$value] += $count;
             }
         }
     }

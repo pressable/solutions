@@ -123,6 +123,79 @@ class CacheAnalyzerTest extends TestCase
     }
 
     // =========================================================================
+    // Batch counting
+    //
+    // The load test doesn't call this once per response. The request generator
+    // tallies a burst first, then the orchestrator forwards each distinct value
+    // with the number of requests that produced it.
+    // =========================================================================
+
+    #[Test]
+    public function collect_headers_counts_one_request_when_no_count_given(): void
+    {
+        $this->analyzer->collect_headers(['x-ac' => 'HIT']);
+
+        $headers = $this->analyzer->get_cache_headers();
+        $this->assertEquals(['HIT' => 1], $headers['x-ac']);
+    }
+
+    #[Test]
+    public function collect_headers_records_a_whole_batch_at_once(): void
+    {
+        $this->analyzer->collect_headers(['x-ac' => 'HIT'], 14);
+
+        $headers = $this->analyzer->get_cache_headers();
+        $this->assertEquals(['HIT' => 14], $headers['x-ac']);
+    }
+
+    #[Test]
+    public function collect_headers_accumulates_batches_across_bursts(): void
+    {
+        $this->analyzer->collect_headers(['x-ac' => 'HIT'], 14);
+        $this->analyzer->collect_headers(['x-ac' => 'MISS'], 1);
+        $this->analyzer->collect_headers(['x-ac' => 'HIT'], 9);
+
+        $headers = $this->analyzer->get_cache_headers();
+        $this->assertEquals(23, $headers['x-ac']['HIT']);
+        $this->assertEquals(1, $headers['x-ac']['MISS']);
+    }
+
+    #[Test]
+    public function collect_headers_preserves_the_shape_of_a_burst(): void
+    {
+        // Regression: a burst of 15 that returned 14 HIT and 1 MISS used to be
+        // recorded as HIT 1 / MISS 1, because the per-value tally was dropped
+        // and every distinct value contributed exactly one. That flattened a
+        // healthy 93% hit rate into an apparent 50/50 coin toss.
+        $burst_tally = ['HIT' => 14, 'MISS' => 1];
+
+        foreach ($burst_tally as $value => $count) {
+            $this->analyzer->collect_headers(['x-ac' => $value], $count);
+        }
+
+        $headers = $this->analyzer->get_cache_headers();
+        $this->assertEquals(15, array_sum($headers['x-ac']), 'counts should sum to the burst size');
+
+        $report = $this->analyzer->generate_report(15);
+        $breakdown = $report['summary']['x-ac_breakdown'];
+        $this->assertEquals(93.3, $breakdown['HIT']['percentage']);
+        $this->assertEquals(6.7, $breakdown['MISS']['percentage']);
+    }
+
+    #[Test]
+    public function average_cache_age_weights_by_request_count(): void
+    {
+        // 9 requests aged 10s and 1 aged 100s average 19s, not the 55s you get
+        // from averaging the two distinct values.
+        $this->analyzer->collect_headers(['age' => '10'], 9);
+        $this->analyzer->collect_headers(['age' => '100'], 1);
+
+        $report = $this->analyzer->generate_report(10);
+
+        $this->assertEquals(19.0, $report['summary']['average_cache_age']);
+    }
+
+    // =========================================================================
     // generate_report() Tests
     // =========================================================================
 
