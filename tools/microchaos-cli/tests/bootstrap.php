@@ -32,6 +32,43 @@ function get_transient(string $key): mixed {
 }
 
 /**
+ * Simplified stand-in for add_query_arg()
+ *
+ * Covers the single key/value/url form the orchestrator uses, including the
+ * fragment handling that makes naive concatenation wrong. It does not replace
+ * an existing key the way core does.
+ */
+function add_query_arg(string $key, string $value, string $url): string {
+    $fragment = '';
+    $hash = strpos($url, '#');
+    if (false !== $hash) {
+        $fragment = substr($url, $hash);
+        $url = substr($url, 0, $hash);
+    }
+
+    $separator = str_contains($url, '?') ? '&' : '?';
+
+    return $url . $separator . rawurlencode($key) . '=' . rawurlencode($value) . $fragment;
+}
+
+/**
+ * Copy of wp_generate_uuid4() from wp-includes/functions.php
+ */
+function wp_generate_uuid4(): string {
+    return sprintf(
+        '%04x%04x-%04x-%04x-%04x-%04x%04x%04x',
+        mt_rand(0, 0xffff),
+        mt_rand(0, 0xffff),
+        mt_rand(0, 0xffff),
+        mt_rand(0, 0x0fff) | 0x4000,
+        mt_rand(0, 0x3fff) | 0x8000,
+        mt_rand(0, 0xffff),
+        mt_rand(0, 0xffff),
+        mt_rand(0, 0xffff)
+    );
+}
+
+/**
  * Load MicroChaos Components
  *
  * Order matters - matches bootstrap.php loading sequence.
@@ -52,6 +89,10 @@ require_once MICROCHAOS_CORE_PATH . '/logging/null-logger.php';
 require_once MICROCHAOS_CORE_PATH . '/thresholds.php';
 require_once MICROCHAOS_CORE_PATH . '/cache-analyzer.php';
 require_once MICROCHAOS_CORE_PATH . '/authentication-manager.php';
+
+// Orchestrator: only its config normalization and URL construction are reachable
+// without WordPress, which is enough to cover flag wiring.
+require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 
 /**
  * WordPress Stubs - Classes

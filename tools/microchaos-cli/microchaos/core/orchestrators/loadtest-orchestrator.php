@@ -53,6 +53,7 @@ class MicroChaos_LoadTest_Orchestrator {
             'body' => null,
             'user_agent' => null,
             'warm_cache' => false,
+            'cache_bust' => false,
             'flush_between' => false,
             'rampup' => false,
             'auth_user' => null,
@@ -155,8 +156,17 @@ class MicroChaos_LoadTest_Orchestrator {
         // Log test start
         $this->log_test_start($config, $endpoint_list, $integration_logger);
 
+        // Announce the measurement mode: the two modes answer different questions
+        // and the numbers are not comparable, so the log has to say which ran.
+        if ($config['cache_bust']) {
+            MicroChaos_Log::log("🚫 Cache busting enabled — every request gets a unique URL, so this measures origin cost, not cache performance.");
+        }
+
         // Warm cache if specified
         if ($config['warm_cache']) {
+            if ($config['cache_bust']) {
+                MicroChaos_Log::warning("--warm-cache does nothing alongside --cache-bust: the test requests use unique URLs, so nothing warmed here is ever reused.");
+            }
             MicroChaos_Log::log("🧤 Warming cache...");
             foreach ($endpoint_list as $endpoint_item) {
                 $request_generator->fire_request(
@@ -358,6 +368,20 @@ class MicroChaos_LoadTest_Orchestrator {
     }
 
     /**
+     * Append a unique query parameter so the request cannot be served from cache
+     *
+     * Uses a UUID rather than a counter because the page and edge caches outlive
+     * the process: a sequence restarting at 1 on every run would hit entries the
+     * previous run created.
+     *
+     * @param string $url URL to make unique
+     * @return string URL with a cache-busting parameter appended
+     */
+    private function apply_cache_buster(string $url): string {
+        return add_query_arg('mc_cb', wp_generate_uuid4(), $url);
+    }
+
+    /**
      * Log test start information
      *
      * @param array $config
@@ -499,7 +523,9 @@ class MicroChaos_LoadTest_Orchestrator {
                     $selected = $endpoint_list[$endpoint_index % count($endpoint_list)];
                     $endpoint_index++;
                 }
-                $burst_urls[] = $selected['url'];
+                $burst_urls[] = $config['cache_bust']
+                    ? $this->apply_cache_buster($selected['url'])
+                    : $selected['url'];
             }
 
             // Fire requests

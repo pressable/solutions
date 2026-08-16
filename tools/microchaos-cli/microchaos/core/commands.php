@@ -84,6 +84,11 @@ class MicroChaos_Commands {
      * [--warm-cache]
      * : Fires a single warm-up request before the test to prime caches.
      *
+     * [--cache-bust]
+     * : Append a unique query parameter to every request so page and edge caches
+     *   always miss. Required when measuring what the origin actually costs, since
+     *   without it a cacheable URL re-serves a cached response and PHP never runs.
+     *
      * [--flush-between]
      * : Calls wp_cache_flush() before each burst to simulate cold cache conditions.
      *
@@ -161,6 +166,11 @@ class MicroChaos_Commands {
      *
      *     # Load test with ramp-up
      *     wp microchaos loadtest --endpoint=shop --count=100 --rampup
+     *
+     *     # Measure a cacheable page twice: what visitors get, then what the origin costs.
+     *     # Run the pair — neither number answers the question on its own.
+     *     wp microchaos loadtest --endpoint=home --duration=2 --warm-cache
+     *     wp microchaos loadtest --endpoint=home --duration=2 --cache-bust
      *
      *     # Test a POST endpoint with form data
      *     wp microchaos loadtest --endpoint=custom:/wp-json/api/v1/orders --count=20 --method=POST --body="product_id=123&quantity=1"
@@ -264,6 +274,7 @@ class MicroChaos_Commands {
             'body' => $assoc_args['body'] ?? null,
             'user_agent' => $assoc_args['user-agent'] ?? null,
             'warm_cache' => isset($assoc_args['warm-cache']),
+            'cache_bust' => isset($assoc_args['cache-bust']),
             'flush_between' => isset($assoc_args['flush-between']),
             'rampup' => isset($assoc_args['rampup']),
             'auth_user' => $assoc_args['auth'] ?? null,
