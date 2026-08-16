@@ -33,9 +33,7 @@ class MicroChaos_Authentication_Manager {
             return null;
         }
 
-        wp_set_current_user($user->ID);
-        wp_set_auth_cookie($user->ID);
-        $cookies = wp_remote_retrieve_cookies(wp_remote_get(home_url()));
+        $cookies = self::build_auth_cookies($user);
 
         MicroChaos_Log::log("🔐 Authenticated as {$user->user_login}");
 
@@ -58,15 +56,51 @@ class MicroChaos_Authentication_Manager {
                 continue;
             }
 
-            wp_set_current_user($user->ID);
-            wp_set_auth_cookie($user->ID);
-            $session_cookies = wp_remote_retrieve_cookies(wp_remote_get(home_url()));
-            $auth_sessions[] = $session_cookies;
+            $auth_sessions[] = self::build_auth_cookies($user);
 
             MicroChaos_Log::log("🔐 Added session for {$user->user_login}");
         }
 
         return $auth_sessions;
+    }
+
+    /**
+     * Build a session cookie jar for a user
+     *
+     * wp_set_auth_cookie() cannot be used from WP-CLI. It hands its cookies to
+     * setcookie(), which is a no-op under the CLI SAPI because there is no HTTP
+     * response for the headers to attach to, and it returns void, so the caller
+     * never sees the values either. The cookies have to be generated directly.
+     *
+     * Deliberately sets no path, domain or expiry attribute: WP_Http_Cookie
+     * passes those through to the Requests cookie jar, which filters on them
+     * before sending. Leaving them unset means the jar always sends the cookie,
+     * which is what a load test wants.
+     *
+     * @param WP_User $user User to open a session for
+     * @return array Array of WP_Http_Cookie objects for wp_remote_request()
+     */
+    private static function build_auth_cookies(WP_User $user): array {
+        $expiration = time() + DAY_IN_SECONDS;
+        $token = WP_Session_Tokens::get_instance($user->ID)->create($expiration);
+
+        // The receiving web request chooses between AUTH_COOKIE and
+        // SECURE_AUTH_COOKIE using its own is_ssl(), which this CLI process
+        // can't observe. Predict it from the site URL scheme instead.
+        $is_https = 'https' === wp_parse_url(home_url(), PHP_URL_SCHEME);
+
+        return [
+            new WP_Http_Cookie([
+                'name' => $is_https ? SECURE_AUTH_COOKIE : AUTH_COOKIE,
+                'value' => wp_generate_auth_cookie($user->ID, $expiration, $is_https ? 'secure_auth' : 'auth', $token),
+            ]),
+            // Front-end logged-in state is validated from this one, so it is
+            // the cookie that makes a cache-bypassed request actually bypass.
+            new WP_Http_Cookie([
+                'name' => LOGGED_IN_COOKIE,
+                'value' => wp_generate_auth_cookie($user->ID, $expiration, 'logged_in', $token),
+            ]),
+        ];
     }
 
     // ==================== HTTP Basic Authentication ====================
