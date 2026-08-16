@@ -1,0 +1,76 @@
+name: MicroChaos CLI
+
+# Scoped to the tool's own path so adding other tools to this monorepo does not
+# make every PR run this workflow.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/microchaos-cli/**'
+      - '.github/workflows/microchaos-cli.yml'
+  pull_request:
+    paths:
+      - 'tools/microchaos-cli/**'
+      - '.github/workflows/microchaos-cli.yml'
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: tools/microchaos-cli
+
+jobs:
+  tests:
+    name: PHPUnit (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 8.1 is the floor declared in composer.json; 8.3 is what Pressable runs.
+        php: ['8.1', '8.3']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+
+      - name: Install dependencies
+        run: composer update --prefer-dist --no-progress --no-interaction
+
+      - name: Lint every PHP source file
+        run: |
+          status=0
+          while IFS= read -r -d '' file; do
+            php -l "$file" > /dev/null || { echo "::error file=$file::PHP syntax error"; status=1; }
+          done < <(find microchaos tests dist microchaos-cli.php -name '*.php' -print0)
+          exit $status
+
+      - name: Run tests
+        run: vendor/bin/phpunit --no-coverage
+
+  bundle:
+    name: dist/ matches source
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Rebuild the single-file bundle
+        run: node build.js
+
+      # The build is deterministic by design (no timestamp), so any difference here
+      # means dist/ was not rebuilt after a source change. The pack deploys dist/,
+      # so a stale bundle ships nothing.
+      - name: Fail if dist/ was not rebuilt after the source change
+        run: |
+          if ! git diff --exit-code --stat -- dist/; then
+            echo "::error::dist/microchaos-cli.php is out of sync with the source. Run 'node build.js' in tools/microchaos-cli and commit the result."
+            exit 1
+          fi
