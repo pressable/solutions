@@ -1,6 +1,6 @@
 # ⚡️ MicroChaos CLI Load Tester
 
-v4.0.0 — "The Headless Horseman"
+v4.1.0 — "Ground Truth"
 
 Welcome to **MicroChaos**—a precision-built WP-CLI load testing tool forged in the fires of real-world WordPress hosting constraints.
 
@@ -20,6 +20,33 @@ Built for staging environments like **Pressable**, MicroChaos simulates traffic 
 - 🧠 **Simulate logged-in users**, WooCommerce flows, REST endpoints, and custom paths
 - 🧰 **Profile caching**, resource usage, and performance regressions from the CLI
 - 🦇 Built for **staging, QA, support engineers, TAMs, and performance-hungry devs**
+
+---
+
+## 🆕 What's New in v4.1.0 "Ground Truth"
+
+v4.1.0 is a correctness release. Every change below fixes a case where MicroChaos
+reported a number that looked plausible and was wrong, so **results from 4.1.0 are not
+comparable with results from earlier builds.** Re-baseline any site you are tracking.
+
+- **Authenticated tests are actually authenticated.** Auth cookies are now built
+  directly instead of via `wp_set_auth_cookie()`, which is a no-op under WP-CLI. Prior
+  "logged-in" runs were measuring anonymous, often cached, traffic.
+- **Cache hit/miss ratios count every request.** Header collection previously recorded
+  each distinct value once per burst instead of accumulating counts.
+- **`--cache-bust` flag** for measuring origin performance rather than edge cache.
+- **Resource output is labelled as the load generator**, not the site under test. Adds
+  generator CPU in cores so you can subtract it from host dashboard readings.
+- **Redirects are no longer counted as errors.** 2xx and 3xx both count as success, and
+  the summary now prints the full status code distribution.
+- **`--timeout` flag**, defaulting to 30s instead of a hardcoded 10s. Timeouts are
+  reported separately from connection errors, with a warning when timing data is
+  right-censored.
+- **Throughput is reported two ways**: wall-clock RPS (pair this with dashboard CPU) and
+  the serial ceiling (the site's intrinsic single-worker throughput). Capacity
+  projections are based on the ceiling and labelled accordingly.
+- **One version, one build.** The plugin header is the single source of truth, the build
+  is reproducible, and CI fails if `dist/` drifts from source.
 
 ---
 

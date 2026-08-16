@@ -11,10 +11,36 @@ if (!defined('ABSPATH') && !defined('WP_CLI')) {
     exit;
 }
 
+if (!function_exists('microchaos_read_plugin_version')) {
+    /**
+     * Read the canonical version from the plugin header.
+     *
+     * The Version line in microchaos-cli.php is the single source of truth, so the
+     * constant is derived from it rather than kept as a second copy that can drift.
+     *
+     * @param string $plugin_file Absolute path to the main plugin file.
+     * @return string Version string, or 'unknown' if the header cannot be read.
+     */
+    function microchaos_read_plugin_version($plugin_file) {
+        if (function_exists('get_file_data')) {
+            $headers = get_file_data($plugin_file, ['Version' => 'Version']);
+
+            if (!empty($headers['Version'])) {
+                return $headers['Version'];
+            }
+        }
+
+        return 'unknown';
+    }
+}
+
 // Define constants
-define('MICROCHAOS_VERSION', '3.0.0');
 define('MICROCHAOS_PATH', dirname(__FILE__));
 define('MICROCHAOS_CORE_PATH', MICROCHAOS_PATH . '/core');
+
+if (!defined('MICROCHAOS_VERSION')) {
+    define('MICROCHAOS_VERSION', microchaos_read_plugin_version(dirname(MICROCHAOS_PATH) . '/microchaos-cli.php'));
+}
 
 /**
  * Bootstrap class for MicroChaos

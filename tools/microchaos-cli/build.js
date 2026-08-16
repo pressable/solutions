@@ -63,12 +63,27 @@ if (!header) {
   process.exit(1);
 }
 
+// Read the canonical version from the plugin header so the bundle never declares
+// a version of its own. Keep this the only place the build learns the version.
+const versionMatch = headerContents.match(/^\s*\*\s*Version:\s*(.+?)\s*$/m);
+
+if (!versionMatch) {
+  console.error("Error: Could not read Version from the plugin header.");
+  process.exit(1);
+}
+
+const version = versionMatch[1];
+console.log(`Version from plugin header: ${version}`);
+
 // Start with the plugin header
 let compiledCode = header + "\n\n";
-compiledCode += `/**\n * COMPILED SINGLE-FILE VERSION\n * Generated on: ${new Date().toISOString()}\n * \n * This is an automatically generated file - DO NOT EDIT DIRECTLY\n * Make changes to the modular version and rebuild.\n */\n\n`;
+// Deliberately no build timestamp: the output must be a pure function of the
+// source so CI can rebuild and byte-compare it against the committed bundle.
+compiledCode += `/**\n * COMPILED SINGLE-FILE VERSION - MicroChaos ${version}\n * \n * This is an automatically generated file - DO NOT EDIT DIRECTLY\n * Make changes to the modular version and rebuild with: node build.js\n */\n\n`;
 
 // Collect all component classes
 const classContents = [];
+const failedComponents = [];
 for (const componentFile of sources.components) {
   console.log(`Processing component: ${path.basename(componentFile)}`);
   const content = fs.readFileSync(componentFile, "utf8");
@@ -87,16 +102,27 @@ for (const componentFile of sources.components) {
   if (classMatches && classMatches[0]) {
     classContents.push(classMatches[0]);
   } else {
-    console.warn(
-      `Warning: Could not extract class/interface from ${path.basename(
-        componentFile
-      )}`
-    );
+    failedComponents.push(path.basename(componentFile));
   }
+}
+
+// A component that fails to extract is silently missing from the bundle, and the
+// result is still valid PHP - so this has to be fatal rather than a warning.
+if (failedComponents.length > 0) {
+  console.error(
+    `Error: could not extract a class/interface from ${failedComponents.length} component(s):`
+  );
+  for (const name of failedComponents) {
+    console.error(`  - ${name}`);
+  }
+  process.exit(1);
 }
 
 // Add component classes to compiled code
 compiledCode += "if (defined('WP_CLI') && WP_CLI) {\n\n";
+// bootstrap.php is not part of the bundle, so the constant it would normally
+// define is emitted here to keep both distributions equivalent.
+compiledCode += `    if (!defined('MICROCHAOS_VERSION')) {\n        define('MICROCHAOS_VERSION', '${version}');\n    }\n\n`;
 compiledCode += classContents.join("\n\n");
 compiledCode += "\n\n";
 
