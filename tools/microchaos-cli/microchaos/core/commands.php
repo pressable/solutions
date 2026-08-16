@@ -125,10 +125,18 @@ class MicroChaos_Commands {
      *   improve as the site degrades.
      *
      * [--resource-logging]
-     * : Log resource utilization during the test.
+     * : Log resource utilization of the load generator — the WP-CLI process sending
+     *   the requests, not the PHP-FPM worker serving them. Those are separate OS
+     *   processes and nothing here measures across the boundary, so worker RAM
+     *   cannot be sized from this output; take that from your host's metrics. What
+     *   is useful is the derived generator CPU, which runs on the same container as
+     *   the site and should be subtracted from any per-site CPU reading taken
+     *   during the test.
      *
      * [--resource-trends]
-     * : Track and analyze resource utilization trends over time. Useful for detecting memory leaks.
+     * : Track the load generator's resource usage over the run. This will not find
+     *   a leak in the site: it watches the generator, whose memory grows with test
+     *   duration because it accumulates its own results.
      *
      * [--cache-headers]
      * : Collect and analyze Pressable-specific cache headers (x-ac for Edge Cache, x-nananana for Batcache).
@@ -209,8 +217,9 @@ class MicroChaos_Commands {
      *     # Run load test for a specific duration
      *     wp microchaos loadtest --endpoint=home --duration=5 --burst=10
      *
-     *     # Run load test with resource trend tracking to detect memory leaks
-     *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging --resource-trends
+     *     # Measure what the load generator itself costs the container, so it can be
+     *     # subtracted from the per-site CPU reading before sizing workers from it.
+     *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging
      *
      *     # Give a slow endpoint room to answer, so the tail is measured rather
      *     # than cut off and recounted as an error.

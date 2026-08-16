@@ -111,6 +111,11 @@ require_once MICROCHAOS_CORE_PATH . '/reporting-engine.php';
 // without WordPress, which is enough to cover flag wiring.
 require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 
+// Resource monitor: reads its own process via getrusage()/memory_get_usage(),
+// so it runs unmodified outside WordPress.
+require_once MICROCHAOS_CORE_PATH . '/storage/transient-baseline-storage.php';
+require_once MICROCHAOS_CORE_PATH . '/resource-monitor.php';
+
 /**
  * WordPress Stubs - Classes
  *

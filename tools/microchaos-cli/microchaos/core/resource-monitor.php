@@ -56,7 +56,15 @@ class MicroChaos_Resource_Monitor {
     }
 
     /**
-     * Log current resource utilization
+     * Log current resource utilization of the load generator process
+     *
+     * Everything here describes the WP-CLI process firing the requests, not the
+     * PHP-FPM worker serving them. They are separate OS processes and nothing
+     * here reaches across that boundary.
+     *
+     * Note that getrusage() returns CUMULATIVE CPU time for the process, so
+     * user_time and system_time rise monotonically across samples. Only the
+     * newest sample is meaningful on its own.
      *
      * @return array Current resource usage data
      */
@@ -67,8 +75,11 @@ class MicroChaos_Resource_Monitor {
         $user_time = round($ru['ru_utime.tv_sec'] + $ru['ru_utime.tv_usec'] / 1e6, 2);
         $system_time = round($ru['ru_stime.tv_sec'] + $ru['ru_stime.tv_usec'] / 1e6, 2);
 
+        $now = microtime(true);
+        $elapsed = round($now - $this->start_time, 4);
+
         if (class_exists('WP_CLI')) {
-            MicroChaos_Log::log("🔍 Resources: Memory Usage: {$memory_usage} MB, Peak Memory: {$peak_memory} MB, CPU Time: User {$user_time}s, System {$system_time}s");
+            MicroChaos_Log::log("🔍 Load generator: Memory {$memory_usage} MB, Peak {$peak_memory} MB, CPU {$user_time}s user + {$system_time}s system over {$elapsed}s");
         }
 
         $result = [
@@ -76,16 +87,52 @@ class MicroChaos_Resource_Monitor {
             'peak_memory'  => $peak_memory,
             'user_time'    => $user_time,
             'system_time'  => $system_time,
+            // Always recorded, not just for trends: turning the cumulative CPU
+            // counter into a rate needs a denominator.
+            'elapsed'      => $elapsed,
         ];
-        
-        // Add timestamp for trend tracking
+
         if ($this->track_trends) {
-            $result['timestamp'] = microtime(true);
-            $result['elapsed'] = round($result['timestamp'] - $this->start_time, 2);
+            $result['timestamp'] = $now;
         }
 
         $this->resource_results[] = $result;
         return $result;
+    }
+
+    /**
+     * Average CPU cores consumed by the load generator itself
+     *
+     * MicroChaos runs on the same container as the site under test, so the CPU
+     * it burns is inside whatever per-site figure the observability dashboard
+     * reports for the same window. Phase 4 divides RPS by that figure, so any
+     * generator overhead left in it understates requests-per-worker and
+     * oversizes the recommendation.
+     *
+     * getrusage() is cumulative, so the newest sample carries the total; divide
+     * by elapsed wall time to get a rate comparable with a dashboard reading.
+     *
+     * @return array{cpu_seconds: float, elapsed: float, cores: float}|null Null when there is nothing to derive from
+     */
+    private function generator_cpu_usage(): ?array {
+        if (empty($this->resource_results)) {
+            return null;
+        }
+
+        $latest = $this->resource_results[array_key_last($this->resource_results)];
+        $elapsed = $latest['elapsed'] ?? 0;
+
+        if ($elapsed <= 0) {
+            return null;
+        }
+
+        $cpu_seconds = $latest['user_time'] + $latest['system_time'];
+
+        return [
+            'cpu_seconds' => round($cpu_seconds, 2),
+            'elapsed'     => round($elapsed, 2),
+            'cores'       => round($cpu_seconds / $elapsed, 3),
+        ];
     }
 
     /**
@@ -159,6 +206,10 @@ class MicroChaos_Resource_Monitor {
                 'min' => round(min($system_times), 2),
                 'max' => round(max($system_times), 2),
             ],
+            // The only figure here that is useful outside this process: what the
+            // generator cost the container, so it can be taken back out of the
+            // dashboard CPU reading Phase 4 sizes from.
+            'generator_cpu' => $this->generator_cpu_usage(),
         ];
     }
 
@@ -177,17 +228,24 @@ class MicroChaos_Resource_Monitor {
         }
 
         if (class_exists('WP_CLI')) {
-            // Format memory with threshold colors
-            $avg_mem_formatted = MicroChaos_Thresholds::format_value($summary['memory']['avg'], 'memory_usage', $threshold_profile);
-            $max_mem_formatted = MicroChaos_Thresholds::format_value($summary['memory']['max'], 'memory_usage', $threshold_profile);
-            $avg_peak_formatted = MicroChaos_Thresholds::format_value($summary['peak_memory']['avg'], 'memory_usage', $threshold_profile);
-            $max_peak_formatted = MicroChaos_Thresholds::format_value($summary['peak_memory']['max'], 'memory_usage', $threshold_profile);
-            
-            MicroChaos_Log::log("📊 Resource Utilization Summary:");
-            MicroChaos_Log::log("   Memory Usage: Avg: {$avg_mem_formatted}, Median: {$summary['memory']['median']} MB, Min: {$summary['memory']['min']} MB, Max: {$max_mem_formatted}");
-            MicroChaos_Log::log("   Peak Memory: Avg: {$avg_peak_formatted}, Median: {$summary['peak_memory']['median']} MB, Min: {$summary['peak_memory']['min']} MB, Max: {$max_peak_formatted}");
-            MicroChaos_Log::log("   CPU Time (User): Avg: {$summary['user_time']['avg']}s, Median: {$summary['user_time']['median']}s, Min: {$summary['user_time']['min']}s, Max: {$summary['user_time']['max']}s");
-            MicroChaos_Log::log("   CPU Time (System): Avg: {$summary['system_time']['avg']}s, Median: {$summary['system_time']['median']}s, Min: {$summary['system_time']['min']}s, Max: {$summary['system_time']['max']}s");
+            // Memory is deliberately uncoloured. format_value() scores it against
+            // ini_get('memory_limit') for the CLI process, which is the wrong
+            // limit for a web worker and is usually -1 here — in which case
+            // get_php_memory_limit_mb() substitutes 128MB and every reading goes
+            // red against a number that doesn't exist.
+            MicroChaos_Log::log("📊 Load Generator Resource Usage (the WP-CLI process, NOT the site):");
+            MicroChaos_Log::log("   Memory Usage: Avg: {$summary['memory']['avg']} MB, Median: {$summary['memory']['median']} MB, Min: {$summary['memory']['min']} MB, Max: {$summary['memory']['max']} MB");
+            MicroChaos_Log::log("   Peak Memory: Avg: {$summary['peak_memory']['avg']} MB, Median: {$summary['peak_memory']['median']} MB, Min: {$summary['peak_memory']['min']} MB, Max: {$summary['peak_memory']['max']} MB");
+            MicroChaos_Log::log("   ⚠ Worker RAM cannot be sized from these. They describe the process");
+            MicroChaos_Log::log("     sending the requests; take per-worker memory from the dashboard.");
+
+            $generator_cpu = $summary['generator_cpu'] ?? null;
+            if ($generator_cpu) {
+                MicroChaos_Log::log("   Generator CPU: {$generator_cpu['cores']} cores avg ({$generator_cpu['cpu_seconds']}s CPU over {$generator_cpu['elapsed']}s wall)");
+                MicroChaos_Log::log("     This runs on the site's own container, so it is included in the");
+                MicroChaos_Log::log("     dashboard's per-site CPU. Subtract it before dividing RPS by CPU,");
+                MicroChaos_Log::log("     or the worker count comes out high.");
+            }
             
             // Add comparison with baseline if provided
             if ($baseline) {
@@ -223,7 +281,7 @@ class MicroChaos_Resource_Monitor {
                     'MaxPeak' => $summary['peak_memory']['max'],
                 ];
                 
-                $chart = MicroChaos_Thresholds::generate_chart($chart_data, "Memory Usage (MB)");
+                $chart = MicroChaos_Thresholds::generate_chart($chart_data, "Load Generator Memory (MB)");
                 MicroChaos_Log::log($chart);
             }
         }
@@ -533,7 +591,7 @@ class MicroChaos_Resource_Monitor {
         $trends = $this->analyze_trends();
         
         if (class_exists('WP_CLI')) {
-            MicroChaos_Log::log("\n📈 Resource Trend Analysis:");
+            MicroChaos_Log::log("\n📈 Load Generator Trend Analysis (the WP-CLI process, NOT the site):");
             MicroChaos_Log::log("   Data Points: {$trends['data_points']} over {$trends['time_span']} seconds");
             
             // Memory usage trends
@@ -550,9 +608,11 @@ class MicroChaos_Resource_Monitor {
             MicroChaos_Log::log("   Peak Memory: {$peak_color}{$peak_direction}{$peak_change}%\033[0m over test duration");
             MicroChaos_Log::log("   Pattern: " . ucfirst(str_replace('_', ' ', $trends['peak_memory']['pattern'])));
             
-            // Warning about unbounded growth if detected
+            // Growth here is the generator accumulating its own results array as
+            // the run gets longer. It is a function of test duration, not site
+            // health, so it must not be reported as a leak.
             if ($trends['potentially_unbounded']) {
-                MicroChaos_Log::warning("⚠️ Potential memory leak detected! Resource usage shows continuous growth pattern.");
+                MicroChaos_Log::log("   Note: generator memory grows with run length because it accumulates its own results. Expected — not a signal about the site.");
             }
             
             // Generate visual trend charts
