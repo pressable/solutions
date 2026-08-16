@@ -102,6 +102,11 @@ require_once MICROCHAOS_CORE_PATH . '/reporting-engine.php';
 require_once MICROCHAOS_CORE_PATH . '/request-generator.php';
 require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 
+// Reporting engine: results aggregation is pure PHP, so summary classification
+// can be tested by feeding it result rows directly.
+require_once MICROCHAOS_CORE_PATH . '/storage/transient-baseline-storage.php';
+require_once MICROCHAOS_CORE_PATH . '/reporting-engine.php';
+
 /**
  * WordPress Stubs - Classes
  *
