@@ -116,6 +116,9 @@ require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 require_once MICROCHAOS_CORE_PATH . '/storage/transient-baseline-storage.php';
 require_once MICROCHAOS_CORE_PATH . '/resource-monitor.php';
 
+// Orchestrator: throughput arithmetic is pure PHP and reachable without a run.
+require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
+
 /**
  * WordPress Stubs - Classes
  *

@@ -235,15 +235,22 @@ class MicroChaos_Reporting_Engine {
                 MicroChaos_Log::log("     Ended:      {$execution_metrics['ended_at']}");
                 MicroChaos_Log::log("     Duration:   {$execution_metrics['duration_seconds']}s ({$execution_metrics['duration_formatted']})");
                 MicroChaos_Log::log("     Requests:   {$execution_metrics['total_requests']}");
-                MicroChaos_Log::log("     Throughput: {$execution_metrics['throughput_rps']} req/s");
+                MicroChaos_Log::log("     Throughput: {$execution_metrics['throughput_rps']} req/s (wall clock, includes --delay pacing)");
+
+                if (isset($execution_metrics['serial_ceiling_rps'])) {
+                    MicroChaos_Log::log("     Serial ceiling: {$execution_metrics['serial_ceiling_rps']} req/s (response time only — what one request at a time costs)");
+                    MicroChaos_Log::log("       {$execution_metrics['pacing_share_pct']}% of the run was pacing and overhead, not waiting on responses.");
+                }
 
                 if (isset($execution_metrics['capacity'])) {
                     MicroChaos_Log::log("");
-                    MicroChaos_Log::log("   Capacity Projection (at current throughput):");
+                    MicroChaos_Log::log("   Single-Worker Capacity (projected from the serial ceiling):");
                     MicroChaos_Log::log("     Per hour:   " . number_format($execution_metrics['capacity']['per_hour']) . " requests");
                     MicroChaos_Log::log("     Per day:    " . number_format($execution_metrics['capacity']['per_day']) . " requests");
                     MicroChaos_Log::log("     Per month:  ~" . $this->format_large_number($execution_metrics['capacity']['per_month']) . " requests");
-                    MicroChaos_Log::log("     ⚠️  Assumes sustained throughput. Actual capacity depends on workers, RAM, cache hit rate.");
+                    MicroChaos_Log::log("     ⚠️  This is ONE worker serving requests back-to-back with no cache hits");
+                    MicroChaos_Log::log("        and no idle time. It is a sizing input, not a capacity estimate —");
+                    MicroChaos_Log::log("        real capacity scales with worker count and cache hit rate.");
                 }
                 MicroChaos_Log::log("   ═══════════════════════════════════════════════════");
                 MicroChaos_Log::log("");
