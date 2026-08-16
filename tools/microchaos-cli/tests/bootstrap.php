@@ -107,6 +107,10 @@ require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 require_once MICROCHAOS_CORE_PATH . '/storage/transient-baseline-storage.php';
 require_once MICROCHAOS_CORE_PATH . '/reporting-engine.php';
 
+// Orchestrator: only its config normalization and URL construction are reachable
+// without WordPress, which is enough to cover flag wiring.
+require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
+
 /**
  * WordPress Stubs - Classes
  *
