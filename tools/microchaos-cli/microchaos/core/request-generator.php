@@ -15,6 +15,16 @@ if (!defined('ABSPATH') && !defined('WP_CLI')) {
  */
 class MicroChaos_Request_Generator {
     /**
+     * Status sentinel for a request abandoned at the timeout
+     */
+    const STATUS_TIMEOUT = 'TIMEOUT';
+
+    /**
+     * Status sentinel for a request that failed for any other reason
+     */
+    const STATUS_ERROR = 'ERROR';
+
+    /**
      * Collect and process cache headers
      *
      * @var bool
@@ -36,6 +46,13 @@ class MicroChaos_Request_Generator {
     private array $last_request_cache_headers = [];
 
     /**
+     * Seconds to wait for a response before abandoning the request
+     *
+     * @var int
+     */
+    private int $timeout = MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT;
+
+    /**
      * Constructor
      *
      * @param array<string, mixed> $options Options for the request generator
@@ -43,6 +60,19 @@ class MicroChaos_Request_Generator {
     public function __construct(array $options = []) {
         $this->collect_cache_headers = isset($options['collect_cache_headers']) ?
             $options['collect_cache_headers'] : false;
+
+        if (isset($options['timeout'])) {
+            $this->timeout = max(1, (int) $options['timeout']);
+        }
+    }
+
+    /**
+     * Get the configured request timeout
+     *
+     * @return int Timeout in seconds
+     */
+    public function get_timeout(): int {
+        return $this->timeout;
     }
 
     /**
@@ -96,7 +126,7 @@ class MicroChaos_Request_Generator {
         for ($i = 0; $i < $current_burst; $i++) {
             $curl = curl_init($url);
             curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($curl, CURLOPT_TIMEOUT, 10);
+            curl_setopt($curl, CURLOPT_TIMEOUT, $this->timeout);
             curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
             
             // Prepare headers array
@@ -155,7 +185,7 @@ class MicroChaos_Request_Generator {
             $end = microtime(true);
             $duration = round($end - $start, 4);
             $info = curl_getinfo($curl);
-            $code = $info['http_code'] ?: 'ERROR';
+            $code = $info['http_code'] ?: self::classify_curl_failure(curl_errno($curl));
 
             // Extract body for GraphQL error detection
             // Note: CURLOPT_HEADER is only set when collect_cache_headers is enabled
@@ -214,7 +244,7 @@ class MicroChaos_Request_Generator {
         $start = microtime(true);
 
         $args = [
-            'timeout' => 10,
+            'timeout' => $this->timeout,
             'blocking' => true,
             'user-agent' => $this->get_user_agent(),
             'method' => $method,
@@ -253,7 +283,7 @@ class MicroChaos_Request_Generator {
 
         $duration = round($end - $start, 4);
         $code = is_wp_error($response)
-            ? 'ERROR'
+            ? self::classify_wp_error($response)
             : wp_remote_retrieve_response_code($response);
 
         // Get response body for GraphQL error detection
@@ -288,6 +318,40 @@ class MicroChaos_Request_Generator {
             'code' => $code,
             'graphql_errors' => $graphql_errors,
         ];
+    }
+
+    /**
+     * Classify a cURL failure
+     *
+     * A timeout and a refused connection are different findings — one says the
+     * site is slow, the other says it is unreachable — so they get separate
+     * sentinels rather than sharing 'ERROR'.
+     *
+     * @param int $errno cURL error number from curl_errno()
+     * @return string Status sentinel for the result row
+     */
+    private static function classify_curl_failure(int $errno): string {
+        return CURLE_OPERATION_TIMEOUTED === $errno
+            ? self::STATUS_TIMEOUT
+            : self::STATUS_ERROR;
+    }
+
+    /**
+     * Classify a WP_Error returned by wp_remote_request()
+     *
+     * WordPress collapses every transport failure into the single error code
+     * 'http_request_failed', so the message is the only place the cause
+     * survives. cURL phrases it "Operation timed out after N milliseconds" and
+     * the streams transport "Connection timed out", hence matching on the
+     * shared substring.
+     *
+     * @param WP_Error $error Error from wp_remote_request()
+     * @return string Status sentinel for the result row
+     */
+    private static function classify_wp_error($error): string {
+        return false !== stripos($error->get_error_message(), 'timed out')
+            ? self::STATUS_TIMEOUT
+            : self::STATUS_ERROR;
     }
 
     /**

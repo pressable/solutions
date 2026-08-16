@@ -112,6 +112,13 @@ class MicroChaos_Commands {
      * [--rampup]
      * : Gradually increase the number of concurrent requests from 1 up to the burst limit.
      *
+     * [--timeout=<seconds>]
+     * : Seconds to wait for a response before abandoning the request. Default: 30.
+     *   Raise it when testing a slow endpoint. A request that times out is not
+     *   recorded as slow, it is recorded as an error and drops out of the timing
+     *   distribution — so a cutoff set too low makes average and max response time
+     *   improve as the site degrades.
+     *
      * [--resource-logging]
      * : Log resource utilization during the test.
      *
@@ -195,6 +202,10 @@ class MicroChaos_Commands {
      *     # Run load test with resource trend tracking to detect memory leaks
      *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging --resource-trends
      *
+     *     # Give a slow endpoint room to answer, so the tail is measured rather
+     *     # than cut off and recounted as an error.
+     *     wp microchaos loadtest --endpoint=custom:/checkout/ --duration=5 --timeout=60
+     *
      *     # Auto-calibrate thresholds based on site's current performance
      *     wp microchaos loadtest --endpoint=home --count=50 --auto-thresholds
      *
@@ -271,6 +282,7 @@ class MicroChaos_Commands {
             'custom_cookies' => $assoc_args['cookie'] ?? null,
             'custom_headers' => $assoc_args['header'] ?? null,
             'rotation_mode' => $assoc_args['rotation-mode'] ?? 'serial',
+            'timeout' => intval($assoc_args['timeout'] ?? MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT),
             'resource_logging' => isset($assoc_args['resource-logging']),
             'resource_trends' => isset($assoc_args['resource-trends']),
             'collect_cache_headers' => isset($assoc_args['cache-headers']),

@@ -25,6 +25,16 @@ class MicroChaos_Constants {
     const DEFAULT_PARALLEL_TIMEOUT = 600;
 
     /**
+     * Default per-request timeout in seconds
+     *
+     * Every abandoned request is a censored measurement: its real duration is
+     * unknown and it leaves the timing distribution as an error. Set well above
+     * any response you would consider acceptable, so the cutoff is a backstop
+     * rather than something a struggling site hits routinely.
+     */
+    const DEFAULT_REQUEST_TIMEOUT = 30;
+
+    /**
      * Default number of parallel workers
      */
     const DEFAULT_WORKERS = 3;
