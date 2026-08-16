@@ -117,6 +117,14 @@ The `--burst` flag controls how many **sequential** requests fire before pausing
 
 **⚠️ Duration Overshoot Warning:** In duration-based tests (`--duration=X`), the current burst always completes before the test stops. A 1-minute test with `--burst=500` on a slow site (1s per request) could run 8+ minutes. Start conservative, scale up.
 
+### Understanding the `--timeout` Flag
+
+Requests are abandoned after `--timeout` seconds (default 30). Raise it when testing something you expect to be slow.
+
+This matters more than a timeout usually does, because an abandoned request is not recorded as slow — it is recorded as an error and leaves the timing distribution entirely. So a cutoff set below what the site actually produces makes average and maximum response time *improve* as the site degrades, while the error rate climbs for a reason that reads as "broken" rather than "slow". Those point at different fixes.
+
+MicroChaos warns when any request hits the cutoff, since the timings printed above it are then conditional on the requests that finished. Treat that warning as a signal to re-run with a higher `--timeout` before drawing conclusions about the tail.
+
 ### The Essential Flag Combo
 
 For capacity planning, always combine these three:

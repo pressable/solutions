@@ -60,6 +60,7 @@ class MicroChaos_LoadTest_Orchestrator {
             'custom_cookies' => null,
             'custom_headers' => null,
             'rotation_mode' => 'serial',
+            'timeout' => MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT,
             'resource_logging' => false,
             'resource_trends' => false,
             'collect_cache_headers' => false,
@@ -100,6 +101,7 @@ class MicroChaos_LoadTest_Orchestrator {
         // Initialize components
         $request_generator = new MicroChaos_Request_Generator([
             'collect_cache_headers' => $config['collect_cache_headers'],
+            'timeout' => $config['timeout'],
         ]);
 
         $resource_monitor = new MicroChaos_Resource_Monitor([
@@ -217,6 +219,8 @@ class MicroChaos_LoadTest_Orchestrator {
         // Display reports
         $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
 
+        $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
+
         if ($config['resource_logging']) {
             $resource_monitor->report_summary($resource_baseline, null, $use_thresholds);
 
@@ -259,6 +263,35 @@ class MicroChaos_LoadTest_Orchestrator {
             'run_by_duration' => $loop_result['run_by_duration'],
             'actual_minutes' => $loop_result['actual_minutes'],
         ];
+    }
+
+    /**
+     * Warn that the timing distribution is right-censored, if any request timed out
+     *
+     * A timed-out request is not a slow measurement, it is an absent one: its
+     * real duration is unknown and the recorded time is just the cutoff. That
+     * makes the reported average and maximum look *better* as the site gets
+     * worse, because the slowest responses leave the timing set and reappear as
+     * errors. Worth saying out loud, since the summary otherwise presents
+     * timings that are quietly conditional on the requests that finished.
+     *
+     * @param MicroChaos_Reporting_Engine $reporting_engine Completed results
+     * @param int $timeout Configured timeout in seconds
+     */
+    private function report_timeout_censoring(MicroChaos_Reporting_Engine $reporting_engine, int $timeout): void {
+        $timeouts = count(array_filter(
+            $reporting_engine->get_results(),
+            static fn($result) => MicroChaos_Request_Generator::STATUS_TIMEOUT === $result['code']
+        ));
+
+        if (0 === $timeouts) {
+            return;
+        }
+
+        MicroChaos_Log::warning("⏱ {$timeouts} request(s) hit the {$timeout}s timeout and were abandoned.");
+        MicroChaos_Log::warning("   Their real response times are unknown, so the timings above are the");
+        MicroChaos_Log::warning("   requests that finished — average and max both read low. Re-run with a");
+        MicroChaos_Log::warning("   higher --timeout to see the tail before drawing conclusions from it.");
     }
 
     /**
