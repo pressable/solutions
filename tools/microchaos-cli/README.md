@@ -125,8 +125,15 @@ For capacity planning, always combine these three:
 --resource-logging --resource-trends --cache-headers
 ```
 
-- **resource-logging**: Memory/CPU per burst (are we hitting limits?)
-- **resource-trends**: Memory over time (detecting leaks)
+- **resource-logging**: Resource usage of the **load generator** — the WP-CLI process
+  sending the requests, not the PHP-FPM worker serving them. Its memory tells you
+  nothing about the site, so size worker RAM from your host's metrics instead. Its
+  derived CPU figure *is* worth having: the generator runs on the same container as
+  the site, so subtract it from any per-site CPU reading taken during the test
+  before dividing throughput by CPU.
+- **resource-trends**: The generator's usage over the run. It will not find a leak in
+  the site — the generator's own memory grows with test duration because it
+  accumulates results as it goes.
 - **cache-headers**: Pressable cache behavior (x-ac, x-nananana)
 
 ---
@@ -417,9 +424,8 @@ wp microchaos loadtest --graphql \
 | Symptom | Likely Cause | Action |
 |---------|--------------|--------|
 | `[GQL errors: N]` appearing | Query syntax issue or schema mismatch | Fix query before load testing |
-| Response times climbing over duration | Memory pressure or connection pooling | Check `--resource-trends` output |
+| Response times climbing over duration | Memory pressure or connection pooling | Check the host's own metrics — `--resource-trends` watches the generator, not the site |
 | 100% BYPASS on all requests | Using POST (expected) or cache misconfigured | Use GET for cacheable queries |
-| Memory growing >20% over test | Potential memory leak in resolver | Profile WPGraphQL resolvers |
 
 ### POST vs GET: Cache Strategy
 
