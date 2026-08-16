@@ -98,6 +98,7 @@ class MicroChaos_Reporting_Engine {
                 'graphql_errors' => 0,
                 'graphql_error_requests' => 0,
                 'error_rate' => 0,
+                'status_codes' => [],
                 'timing' => [
                     'avg' => 0,
                     'median' => 0,
@@ -116,8 +117,10 @@ class MicroChaos_Reporting_Engine {
         $min = round(min($times), 4);
         $max = round(max($times), 4);
 
-        $successes = count(array_filter($this->results, fn($r) => $r['code'] === 200));
+        $successes = count(array_filter($this->results, fn($r) => self::is_success_code($r['code'])));
         $http_errors = $count - $successes;
+
+        $status_codes = $this->tally_status_codes();
 
         // Count GraphQL errors (requests that returned 200 but had errors in response)
         $graphql_errors = array_sum(array_map(
@@ -135,11 +138,12 @@ class MicroChaos_Reporting_Engine {
 
         return [
             'count' => $count,
-            'success' => $successes - $requests_with_gql_errors, // True success = HTTP 200 AND no GQL errors
+            'success' => $successes - $requests_with_gql_errors, // True success = non-error HTTP status AND no GQL errors
             'http_errors' => $http_errors,
             'graphql_errors' => $graphql_errors,
             'graphql_error_requests' => $requests_with_gql_errors,
             'error_rate' => $error_rate,
+            'status_codes' => $status_codes,
             'timing' => [
                 'avg' => $avg,
                 'median' => $median,
@@ -147,6 +151,57 @@ class MicroChaos_Reporting_Engine {
                 'max' => $max,
             ],
         ];
+    }
+
+    /**
+     * Decide whether a response status counts as a success
+     *
+     * 2xx and 3xx both mean the origin handled the request. A redirect is a
+     * normal answer from a lot of the endpoints most worth load testing — an
+     * empty cart returning 302 from /checkout/ is correct behaviour, not a
+     * failure — so only 4xx and 5xx are errors.
+     *
+     * The code arrives as an int from the cURL batch path and, depending on the
+     * transport, can arrive as a numeric string from wp_remote_request(). Both
+     * are accepted. The 'ERROR' sentinel used for a failed request is not
+     * numeric, so it falls through to false.
+     *
+     * @param mixed $code Status code from a result row
+     * @return bool True when the request should count as a success
+     */
+    private static function is_success_code($code): bool {
+        if (!is_numeric($code)) {
+            return false;
+        }
+
+        $code = (int) $code;
+
+        return $code >= 200 && $code < 400;
+    }
+
+    /**
+     * Count how many times each status code came back
+     *
+     * Reported alongside the error rate so a redirect-heavy or error-heavy path
+     * identifies itself, rather than disappearing into a single bucket.
+     *
+     * Keys are whatever the transport reported: an int for a real status code
+     * (PHP coerces numeric keys), the string 'ERROR' for a request that never
+     * completed.
+     *
+     * @return array<int|string, int> Status code => count, ordered most frequent first
+     */
+    private function tally_status_codes(): array {
+        $tally = [];
+
+        foreach ($this->results as $result) {
+            $code = $result['code'];
+            $tally[$code] = ($tally[$code] ?? 0) + 1;
+        }
+
+        arsort($tally);
+
+        return $tally;
     }
 
     /**
@@ -206,6 +261,17 @@ class MicroChaos_Reporting_Engine {
             }
             $error_parts[] = "Error Rate: {$error_formatted}";
             MicroChaos_Log::log("     " . implode(" | ", $error_parts));
+
+            // Show the distribution whenever it isn't a single uniform code, so
+            // a run carrying redirects says so instead of leaving the operator
+            // to infer it from the gap between total and success.
+            if (!empty($summary['status_codes']) && count($summary['status_codes']) > 1) {
+                $code_parts = [];
+                foreach ($summary['status_codes'] as $code => $code_count) {
+                    $code_parts[] = "{$code}: {$code_count}";
+                }
+                MicroChaos_Log::log("     Status Codes: " . implode(" | ", $code_parts));
+            }
             
             // Format with threshold colors
             $avg_time_formatted = MicroChaos_Thresholds::format_value($summary['timing']['avg'], 'response_time', $threshold_profile);

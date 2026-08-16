@@ -9,6 +9,7 @@
 // Define constants to allow file loading (bypasses direct access guards)
 define('WP_CLI', true);
 define('ABSPATH', '/tmp/fake-wordpress/');
+define('WP_CONTENT_DIR', ABSPATH . 'wp-content');
 
 // Define path constants that bootstrap.php normally sets
 define('MICROCHAOS_VERSION', '3.0.0-test');
@@ -43,6 +44,7 @@ require_once MICROCHAOS_CORE_PATH . '/constants.php';
 
 // Interfaces (load before implementations)
 require_once MICROCHAOS_CORE_PATH . '/interfaces/logger.php';
+require_once MICROCHAOS_CORE_PATH . '/interfaces/baseline-storage.php';
 
 // Logging infrastructure (needed for components that log)
 require_once MICROCHAOS_CORE_PATH . '/log.php';
@@ -52,6 +54,11 @@ require_once MICROCHAOS_CORE_PATH . '/logging/null-logger.php';
 require_once MICROCHAOS_CORE_PATH . '/thresholds.php';
 require_once MICROCHAOS_CORE_PATH . '/cache-analyzer.php';
 require_once MICROCHAOS_CORE_PATH . '/authentication-manager.php';
+
+// Reporting engine: results aggregation is pure PHP, so summary classification
+// can be tested by feeding it result rows directly.
+require_once MICROCHAOS_CORE_PATH . '/storage/transient-baseline-storage.php';
+require_once MICROCHAOS_CORE_PATH . '/reporting-engine.php';
 
 /**
  * WordPress Stubs - Classes
