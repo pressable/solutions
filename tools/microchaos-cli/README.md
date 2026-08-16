@@ -65,8 +65,8 @@ v3.0.0 is a **radical simplification**. We removed features that didn't work rel
 ### New Features
 
 - **Execution Metrics** - Every test now reports:
-  - Requests per second (RPS) achieved
-  - Capacity projections (hourly/daily/monthly)
+  - Wall-clock throughput, and the serial ceiling it should be read against
+  - Single-worker capacity projections (hourly/daily/monthly)
   - Test timestamps (human-readable + ISO 8601)
   - Total duration with formatted display
 
@@ -179,15 +179,25 @@ wp microchaos loadtest --endpoints=home,shop,cart,checkout \
 
 #### Execution Metrics (Capacity)
 
+Two throughput numbers are reported, and they answer different questions:
+
 ```
-Throughput: 4.74 RPS
-Capacity: 17,064/hour | 409,536/day | 12.3M/month
+Throughput: 4.74 req/s (wall clock, includes --delay pacing)
+Serial ceiling: 8.31 req/s (response time only — what one request at a time costs)
+  43.0% of the run was pacing and overhead, not waiting on responses.
+
+Single-Worker Capacity (projected from the serial ceiling):
+  Per hour: 29,916 | Per day: 717,984 | Per month: ~21.5M
 ```
 
+**Throughput** is requests divided by wall-clock time, so it counts the `--delay` sleeps between bursts as though they were work. Change `--delay` or `--burst` and this number changes while the site does not. It is *not* a capacity limit. Its one real use is pairing with a host CPU reading, which covers the same window.
+
+**Serial ceiling** divides by time actually spent waiting on responses. That is what one request at a time costs this site, independent of how you paced the run, and it is the figure to compare across runs and across dates.
+
 **Decision logic:**
-- Compare achieved RPS to traffic requirements
-- If target is 10 RPS and you hit 4.7 RPS → need optimization or scaling
-- Capacity projections show monthly headroom
+- Read per-request cost from the serial ceiling, never from wall-clock throughput. A low wall-clock number usually means you paced conservatively, not that the site is slow.
+- Treat single-worker capacity as a **sizing input, not a capacity estimate**. It assumes one worker, back-to-back requests, no cache hits and no idle time — so it is a floor for a single worker, not a ceiling for the site. Real capacity scales with worker count and cache hit rate.
+- If the pacing share is high, the run spent most of its time asleep. That is fine for a soak test, but do not read the wall-clock figure as a limit.
 
 #### Resource Trends (Stability)
 

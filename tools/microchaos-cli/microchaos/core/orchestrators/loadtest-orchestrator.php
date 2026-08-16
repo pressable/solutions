@@ -187,7 +187,8 @@ class MicroChaos_LoadTest_Orchestrator {
         $execution_metrics = $this->build_execution_metrics(
             $loop_result['test_start_timestamp'],
             $loop_result['test_end_timestamp'],
-            $loop_result['completed']
+            $loop_result['completed'],
+            $reporting_engine->get_results()
         );
 
         // Handle baseline comparison
@@ -588,14 +589,40 @@ class MicroChaos_LoadTest_Orchestrator {
     /**
      * Build execution metrics
      *
-     * @param float $start_timestamp
-     * @param float $end_timestamp
-     * @param int $completed
+     * Two throughput figures, because they answer different questions and only
+     * one of them is a property of the site.
+     *
+     * Wall-clock RPS counts the --delay sleeps between bursts as though they
+     * were work, so it moves when the operator changes pacing flags and two
+     * runs against an identical site disagree. It is still the right figure to
+     * pair with a dashboard CPU reading, which covers the same window.
+     *
+     * The serial ceiling divides by time actually spent waiting on responses.
+     * That is what one request-at-a-time costs this site, independent of how
+     * the run was paced, and it is the honest basis for projecting forward.
+     *
+     * @param float $start_timestamp Wall-clock start
+     * @param float $end_timestamp Wall-clock end
+     * @param int $completed Requests completed
+     * @param array<int, array<string, mixed>> $results Result rows, for their recorded response times
      * @return array Execution metrics
      */
-    private function build_execution_metrics(float $start_timestamp, float $end_timestamp, int $completed): array {
+    private function build_execution_metrics(float $start_timestamp, float $end_timestamp, int $completed, array $results = []): array {
         $duration = $end_timestamp - $start_timestamp;
         $rps = $duration > 0 ? round($completed / $duration, 2) : 0;
+
+        $response_time_total = (float) array_sum(array_column($results, 'time'));
+        $serial_ceiling_rps = $response_time_total > 0
+            ? round($completed / $response_time_total, 2)
+            : 0.0;
+
+        // How much of the run was pacing rather than requests. Makes the gap
+        // between the two throughput figures self-explanatory. Clamped at zero
+        // because rounding can put recorded response time marginally above the
+        // wall clock, and a negative share would be nonsense to print.
+        $pacing_share_pct = $duration > 0
+            ? max(0.0, round((($duration - $response_time_total) / $duration) * 100, 1))
+            : 0.0;
 
         return [
             'started_at' => date('Y-m-d H:i:s', (int)$start_timestamp),
@@ -606,10 +633,15 @@ class MicroChaos_LoadTest_Orchestrator {
             'duration_formatted' => $this->format_duration($duration),
             'total_requests' => $completed,
             'throughput_rps' => $rps,
+            'serial_ceiling_rps' => $serial_ceiling_rps,
+            'response_time_total' => round($response_time_total, 2),
+            'pacing_share_pct' => $pacing_share_pct,
+            // Projected from the serial ceiling, not wall-clock throughput, so
+            // the figure describes the site rather than the chosen --delay.
             'capacity' => [
-                'per_hour' => (int)($rps * 3600),
-                'per_day' => (int)($rps * 86400),
-                'per_month' => (int)($rps * 2592000),
+                'per_hour' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_HOUR),
+                'per_day' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_DAY),
+                'per_month' => (int)($serial_ceiling_rps * MicroChaos_Constants::SECONDS_PER_DAY * 30),
             ],
         ];
     }

@@ -53,6 +53,9 @@ require_once MICROCHAOS_CORE_PATH . '/thresholds.php';
 require_once MICROCHAOS_CORE_PATH . '/cache-analyzer.php';
 require_once MICROCHAOS_CORE_PATH . '/authentication-manager.php';
 
+// Orchestrator: throughput arithmetic is pure PHP and reachable without a run.
+require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
+
 /**
  * WordPress Stubs - Classes
  *
