@@ -73,6 +73,9 @@ class MicroChaos_LoadTest_Orchestrator {
             'save_baseline' => null,
             'compare_baseline' => null,
             'log_path' => null,
+            'concurrency' => MicroChaos_Constants::DEFAULT_CONCURRENCY,
+            'results_json' => null,
+            'worker_id' => null,
         ], $config);
     }
 
@@ -227,12 +230,21 @@ class MicroChaos_LoadTest_Orchestrator {
             );
         }
 
-        // Display reports
-        $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
+        if (!empty($config['results_json'])) {
+            $this->write_results_json($config['results_json'], $reporting_engine, $loop_result, $cache_analyzer);
+        }
 
-        $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
+        // A worker writing results-json is collected by the parent; printing
+        // a second summary here would interleave with its siblings.
+        if (empty($config['results_json'])) {
+            $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
+        }
 
-        if ($config['resource_logging']) {
+        if (empty($config['results_json'])) {
+            $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
+        }
+
+        if ($config['resource_logging'] && empty($config['results_json'])) {
             $resource_monitor->report_summary($resource_baseline, null, $use_thresholds);
 
             if ($config['resource_trends']) {
@@ -241,7 +253,7 @@ class MicroChaos_LoadTest_Orchestrator {
         }
 
         // Save baseline if specified
-        if ($config['save_baseline']) {
+        if ($config['save_baseline'] && empty($config['results_json'])) {
             $reporting_engine->save_baseline($config['save_baseline']);
             if ($config['resource_logging']) {
                 $resource_monitor->save_baseline($config['save_baseline']);
@@ -250,7 +262,7 @@ class MicroChaos_LoadTest_Orchestrator {
         }
 
         // Report cache headers if enabled
-        if ($config['collect_cache_headers']) {
+        if ($config['collect_cache_headers'] && empty($config['results_json'])) {
             $cache_analyzer->report_summary($reporting_engine->get_request_count());
         }
 
@@ -274,6 +286,40 @@ class MicroChaos_LoadTest_Orchestrator {
             'run_by_duration' => $loop_result['run_by_duration'],
             'actual_minutes' => $loop_result['actual_minutes'],
         ];
+    }
+
+    /**
+     * Write this process's raw results for a parent overlap run to merge.
+     *
+     * @param string $path Absolute path
+     * @param MicroChaos_Reporting_Engine $reporting_engine
+     * @param array<string, mixed> $loop_result
+     * @param MicroChaos_Cache_Analyzer $cache_analyzer
+     */
+    private function write_results_json(string $path, MicroChaos_Reporting_Engine $reporting_engine, array $loop_result, MicroChaos_Cache_Analyzer $cache_analyzer): void {
+        $payload = [
+            'worker_id' => $this->config['worker_id'],
+            'results' => $reporting_engine->get_results(),
+            'completed' => $loop_result['completed'],
+            'run_by_duration' => $loop_result['run_by_duration'],
+            'test_start_timestamp' => $loop_result['test_start_timestamp'],
+            'test_end_timestamp' => $loop_result['test_end_timestamp'],
+            'cache_headers' => $cache_analyzer->get_cache_headers(),
+        ];
+
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+            MicroChaos_Log::error("Could not write results JSON directory: {$dir}");
+        }
+
+        $json = function_exists('wp_json_encode')
+            ? wp_json_encode($payload, JSON_UNESCAPED_SLASHES)
+            : json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+        $written = @file_put_contents($path, $json);
+        if ($written === false) {
+            MicroChaos_Log::error("Could not write results JSON: {$path}");
+        }
     }
 
     /**

@@ -122,6 +122,9 @@ require_once MICROCHAOS_CORE_PATH . '/resource-monitor.php';
 // Orchestrator: throughput arithmetic is pure PHP and reachable without a run.
 require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
 
+// Concurrency runner: clamp / child-arg / flag formatting are pure PHP.
+require_once MICROCHAOS_CORE_PATH . '/concurrency-runner.php';
+
 /**
  * WordPress Stubs - Classes
  *

@@ -97,6 +97,7 @@ class MicroChaos_Bootstrap {
             'cache-analyzer.php',
             'resource-monitor.php',
             'reporting-engine.php',
+            'concurrency-runner.php',
             'commands.php',  // Must be last - depends on orchestrators
         ];
 

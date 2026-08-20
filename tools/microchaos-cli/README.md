@@ -1,6 +1,6 @@
 # ⚡️ MicroChaos CLI Load Tester
 
-v4.1.0 — "Ground Truth"
+v4.2.0 — "Overlap"
 
 Welcome to **MicroChaos**—a precision-built WP-CLI load testing tool forged in the fires of real-world WordPress hosting constraints.
 
@@ -22,6 +22,26 @@ Built for staging environments like **Pressable**, MicroChaos simulates traffic 
 - 🦇 Built for **staging, QA, support engineers, TAMs, and performance-hungry devs**
 
 ---
+
+## 🆕 What's New in v4.2.0 "Overlap"
+
+v4.1.0 told the truth about what one process can measure: `--burst` is pacing,
+and a single WP-CLI process fires requests one at a time. That is still true,
+and it is still the sizing input.
+
+v4.2.0 adds the overlap run that v3 removed for the wrong mechanism. The old
+`--concurrency` was curl_multi inside one process; Pressable loopback serializes
+that. The new `--concurrency=N` launches N sequential `loadtest` processes at
+the same instant — the method that produced real overlap on Pressable (cache
+stampede races, HIT/regen splits on an already-warm URL).
+
+- **`--concurrency=N`** (default 1, cap 8). `--count` and `--duration` are per
+  process. `--count=1 --concurrency=4` is a four-request stampede.
+- **`--results-json=<path>`** so workers can hand results back without
+  interleaving summaries. The parent prints one merged report.
+- Combined Throughput from an overlap run is **not** a Phase 4 RPS. Size on a
+  sequential `--cache-bust` run. The summary says so.
+- Sequential default is unchanged. Existing 4.1.0 commands keep their numbers.
 
 ## 🆕 What's New in v4.1.0 "Ground Truth"
 
@@ -108,11 +128,14 @@ v3.0.0 is a **radical simplification**. We removed features that didn't work rel
 
 These features were removed because they don't work on Pressable due to loopback rate limiting:
 
-- ❌ `wp microchaos parallel` - Parallel test execution
+- ❌ `wp microchaos parallel` - Parallel test execution (one-process curl_multi)
 - ❌ `wp microchaos progressive` - Progressive load testing
-- ❌ `--concurrency` flag - True concurrent requests
+- ❌ `--concurrency` flag as curl_multi-in-one-process (did not overlap on Pressable)
 
-If you need these features, use an external load testing tool (k6, Artillery, etc.) that can hit your site from outside.
+v4.2.0 brings `--concurrency` back as **process fan-out**, which is a different
+mechanism and the one that actually overlaps on this platform. External tools
+(k6, Artillery) remain the right choice for hundreds of VUs from outside the
+container.
 
 ---
 
@@ -128,7 +151,7 @@ If you need these features, use an external load testing tool (k6, Artillery, et
 
 ## 🚨 Platform Considerations (Pressable & Managed Hosts)
 
-MicroChaos is built specifically for **Pressable** and similar managed WordPress hosts where loopback requests are rate-limited (~10 concurrent max). The tool uses **serial execution** which works perfectly within these constraints.
+MicroChaos is built specifically for **Pressable** and similar managed WordPress hosts where loopback requests are rate-limited (~10 concurrent max). The default path is still **serial execution** inside one process. `--concurrency=N` overlaps by launching N of those serial processes; stay at or under 8, and treat 4 as the starting point on a 5-worker staging box.
 
 ### Understanding the `--burst` Flag
 
@@ -608,8 +631,10 @@ wp microchaos loadtest --endpoint=checkout --count=50 --auth=admin@example.com -
 - `--endpoints=<endpoint-list>` Comma-separated list of endpoints to rotate through
 - `--count=<n>` Total requests to send (default: 100)
 - `--duration=<minutes>` Run test for specified duration instead of fixed request count
-- `--burst=<n>` Requests per burst (default: 10)
+- `--burst=<n>` Requests per burst (default: 10). Pacing, not concurrency.
 - `--delay=<seconds>` Delay between bursts (default: 2)
+- `--concurrency=<n>` Sequential processes launched together (default: 1, cap: 8). `--count` and `--duration` are per process.
+- `--results-json=<path>` Write machine-readable results to a JSON file
 
 ### Request Configuration
 
@@ -656,6 +681,13 @@ Load test the homepage with cache warmup and log output
 
 ```bash
 wp microchaos loadtest --endpoint=home --count=100 --warm-cache --log-to=uploads/home-log.txt
+```
+
+Four-request stampede (one request per process, launched together). Combined Throughput is not a sizing RPS.
+
+```bash
+wp microchaos loadtest --endpoint=custom:/fresh-page/ --count=1 --cache-bust --concurrency=4
+wp microchaos loadtest --endpoint=home --count=1 --warm-cache --cache-headers --concurrency=4
 ```
 
 Test multiple endpoints with random rotation
