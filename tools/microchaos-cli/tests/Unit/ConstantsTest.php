@@ -84,5 +84,12 @@ class ConstantsTest extends TestCase
         // 3 workers default
         $this->assertEquals(3, \MicroChaos_Constants::DEFAULT_WORKERS);
         $this->assertGreaterThan(0, \MicroChaos_Constants::DEFAULT_WORKERS);
+
+        $this->assertSame(1, \MicroChaos_Constants::DEFAULT_CONCURRENCY);
+        $this->assertSame(8, \MicroChaos_Constants::MAX_CONCURRENCY);
+        $this->assertGreaterThan(
+            \MicroChaos_Constants::DEFAULT_CONCURRENCY,
+            \MicroChaos_Constants::MAX_CONCURRENCY
+        );
     }
 }

@@ -39,6 +39,15 @@ class LoadTestOrchestratorTest extends TestCase
     // =========================================================================
 
     #[Test]
+    public function concurrency_defaults_to_one(): void
+    {
+        $config = $this->config($this->orchestrator());
+
+        $this->assertSame(\MicroChaos_Constants::DEFAULT_CONCURRENCY, $config['concurrency']);
+        $this->assertNull($config['results_json']);
+    }
+
+    #[Test]
     public function cache_bust_defaults_to_off(): void
     {
         // Omitting the default here is what produces an undefined-index notice
