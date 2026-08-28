@@ -1,6 +1,6 @@
 # ⚡️ MicroChaos CLI Load Tester
 
-v4.2.0 — "Overlap"
+v4.2.1 — "Overlap"
 
 Welcome to **MicroChaos**—a precision-built WP-CLI load testing tool forged in the fires of real-world WordPress hosting constraints.
 
@@ -22,6 +22,23 @@ Built for staging environments like **Pressable**, MicroChaos simulates traffic 
 - 🦇 Built for **staging, QA, support engineers, TAMs, and performance-hungry devs**
 
 ---
+
+## 🆕 What's New in v4.2.1
+
+The legacy `MicroChaos_LoadTest_Command` fallback class is removed from
+`microchaos-cli.php`, taking that file from 660 lines to 33.
+
+It registered only when the modular system failed to load, so it never ran on a
+healthy install and the build already stripped it from `dist/`. The problem was
+what it would have done if it ever did run: it still called
+`wp_set_auth_cookie()`, which does nothing under the CLI SAPI, still scored any
+status other than `200` as an error, still hardcoded a 10 second timeout, and
+had no `--cache-bust` or `--concurrency`. Every one of those is a defect fixed
+in 4.1.0 or 4.2.0. A broken install produced confident wrong numbers with no
+indication which code path had answered.
+
+A missing `microchaos/bootstrap.php` now calls `WP_CLI::error()` and registers
+no command at all. No command is better than a command that lies.
 
 ## 🆕 What's New in v4.2.0 "Overlap"
 
