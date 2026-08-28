@@ -19,6 +19,8 @@ const sources = {
   components: [
     // Load constants first
     path.join(__dirname, "microchaos/core/constants.php"),
+    // Load the test-mode descriptor before anything that reports a run
+    path.join(__dirname, "microchaos/core/test-mode.php"),
     // Load interfaces (logger first - used by all components)
     path.join(__dirname, "microchaos/core/interfaces/logger.php"),
     path.join(__dirname, "microchaos/core/interfaces/baseline-storage.php"),
@@ -39,6 +41,7 @@ const sources = {
     path.join(__dirname, "microchaos/core/reporting-engine.php"),
     // Load orchestrators (before commands which depends on them)
     path.join(__dirname, "microchaos/core/orchestrators/loadtest-orchestrator.php"),
+    path.join(__dirname, "microchaos/core/concurrency-runner.php"),
     // Load commands last (depends on orchestrators)
     path.join(__dirname, "microchaos/core/commands.php"),
   ],

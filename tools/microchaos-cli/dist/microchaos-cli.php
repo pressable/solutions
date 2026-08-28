@@ -3,7 +3,7 @@
  * Plugin Name: MicroChaos CLI Load Tester
  * Description: Internal WP-CLI based WordPress load tester for staging environments where
  * external load testing is restricted (like Pressable).
- * Version: 4.1.0
+ * Version: 4.2.0
  * Author: Phill
  * License: GPL-3.0-or-later
  *
@@ -15,7 +15,7 @@
 // Bootstrap MicroChaos components
 
 /**
- * COMPILED SINGLE-FILE VERSION - MicroChaos 4.1.0
+ * COMPILED SINGLE-FILE VERSION - MicroChaos 4.2.0
  * 
  * This is an automatically generated file - DO NOT EDIT DIRECTLY
  * Make changes to the modular version and rebuild with: node build.js
@@ -24,7 +24,7 @@
 if (defined('WP_CLI') && WP_CLI) {
 
     if (!defined('MICROCHAOS_VERSION')) {
-        define('MICROCHAOS_VERSION', '4.1.0');
+        define('MICROCHAOS_VERSION', '4.2.0');
     }
 
 class MicroChaos_Constants {
@@ -54,6 +54,17 @@ class MicroChaos_Constants {
     const DEFAULT_WORKERS = 3;
 
     /**
+     * Default --concurrency. 1 is the sequential path; nothing fans out.
+     */
+    const DEFAULT_CONCURRENCY = 1;
+
+    /**
+     * Hard cap on --concurrency. Staging boxes are 5 workers; past 8 the
+     * generators themselves start to be the thing under test.
+     */
+    const MAX_CONCURRENCY = 8;
+
+    /**
      * Time conversion constants
      */
     const SECONDS_PER_MINUTE = 60;
@@ -66,6 +77,95 @@ class MicroChaos_Constants {
     const HTTP_OK = 200;
     const HTTP_NOT_FOUND = 404;
     const HTTP_SERVER_ERROR = 500;
+}
+
+class MicroChaos_Test_Mode {
+
+    /**
+     * Resolve the mode descriptor for a run.
+     *
+     * @param array<string, mixed> $config Parsed config
+     * @return array{id: string, label: string, measures: string, sizing: string, sizing_ok: bool}
+     */
+    public static function resolve(array $config): array {
+        $concurrency = (int) ($config['concurrency'] ?? 1);
+
+        if ($concurrency > 1) {
+            return [
+                'id' => 'overlap',
+                'label' => "Overlap ({$concurrency} processes launched together)",
+                'measures' => 'How the site behaves when requests actually share workers.',
+                'sizing' => 'Not a sizing input. Combined Throughput mixes queueing and '
+                    . "{$concurrency} load generators into one figure.",
+                'sizing_ok' => false,
+            ];
+        }
+
+        $cache_bust = !empty($config['cache_bust']);
+        $warm_cache = !empty($config['warm_cache']);
+
+        // --cache-bust wins the label when both are set. The orchestrator already
+        // warns that warming is pointless alongside it, and the run does measure
+        // origin cost, so calling it anything else would be the bigger lie.
+        if ($cache_bust) {
+            return [
+                'id' => 'origin-cost',
+                'label' => 'Origin cost (sequential, cache-busted)',
+                'measures' => 'What one uncached request costs the origin, one request at a time.',
+                'sizing' => 'Throughput from this run is the Phase 4 sizing input.',
+                'sizing_ok' => true,
+            ];
+        }
+
+        if ($warm_cache) {
+            return [
+                'id' => 'cache-effectiveness',
+                'label' => 'Cache effectiveness (sequential, warmed)',
+                'measures' => 'What the cache serves once the URL is warm.',
+                'sizing' => 'Not a sizing input. Compare it against a --cache-bust run to see '
+                    . 'what the cache is buying the customer.',
+                'sizing_ok' => false,
+            ];
+        }
+
+        return [
+            'id' => 'uncontrolled',
+            'label' => 'Sequential, cache state not controlled',
+            'measures' => 'A mix. Some requests may be served from cache and some not, '
+                . 'and the split is not recorded.',
+            'sizing' => 'Neither origin cost nor cache effectiveness. Add --cache-bust for '
+                . 'sizing, or --warm-cache to measure the cache.',
+            'sizing_ok' => false,
+        ];
+    }
+
+    /**
+     * Announce the mode before the run starts, so the operator sees what is
+     * being measured while it happens rather than only in the summary.
+     *
+     * @param array{label: string, measures: string, sizing: string, sizing_ok: bool} $mode
+     */
+    public static function announce(array $mode): void {
+        MicroChaos_Log::log("🧪 Test mode: {$mode['label']}");
+        MicroChaos_Log::log("   Measures: {$mode['measures']}");
+
+        if ($mode['sizing_ok']) {
+            MicroChaos_Log::log("   Sizing:   {$mode['sizing']}");
+            return;
+        }
+
+        MicroChaos_Log::warning("   Sizing:   {$mode['sizing']}");
+    }
+
+    /**
+     * The one-line form carried in the summary block.
+     *
+     * @param array{label: string, sizing: string} $mode
+     * @return string
+     */
+    public static function summary_line(array $mode): string {
+        return "{$mode['label']} — {$mode['sizing']}";
+    }
 }
 
 interface MicroChaos_Logger_Interface {
@@ -1334,129 +1434,6 @@ class MicroChaos_Request_Generator {
     }
 
     /**
-     * Fire an asynchronous batch of requests
-     *
-     * @param string $url Target URL
-     * @param string|null $log_path Optional path for logging
-     * @param array|null $cookies Optional cookies for authentication
-     * @param int $current_burst Number of concurrent requests to fire
-     * @param string $method HTTP method
-     * @param string|null $body Request body for POST/PUT
-     * @return array<int, array{time: float, code: int|string}> Results of the requests
-     */
-    public function fire_requests_async(string $url, ?string $log_path, ?array $cookies, int $current_burst, string $method = 'GET', ?string $body = null): array {
-        $results = [];
-        $multi_handle = curl_multi_init();
-        $curl_handles = [];
-
-        for ($i = 0; $i < $current_burst; $i++) {
-            $curl = curl_init($url);
-            curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($curl, CURLOPT_TIMEOUT, $this->timeout);
-            curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
-            
-            // Prepare headers array
-            $headers = [
-                'User-Agent: ' . $this->get_user_agent(),
-            ];
-            
-            // Add custom headers if any
-            if (!empty($this->custom_headers)) {
-                foreach ($this->custom_headers as $name => $value) {
-                    $headers[] = "$name: $value";
-                }
-            }
-            
-            curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-
-            // For cache header collection
-            if ($this->collect_cache_headers) {
-                curl_setopt($curl, CURLOPT_HEADER, true);
-            }
-
-            // Handle body data
-            if ($body) {
-                if ($this->is_json($body)) {
-                    // Add content-type header to existing headers
-                    $headers[] = 'Content-Type: application/json';
-                    curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
-                } else {
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
-                }
-            }
-
-            if ($cookies) {
-                $selected = MicroChaos_Authentication_Manager::is_multi_auth($cookies)
-                    ? MicroChaos_Authentication_Manager::select_random_session($cookies)
-                    : $cookies;
-                curl_setopt($curl, CURLOPT_COOKIE, MicroChaos_Authentication_Manager::format_for_curl($selected));
-            }
-            curl_setopt($curl, CURLOPT_URL, $url);
-            $start = microtime(true); // record start time for this request
-            curl_multi_add_handle($multi_handle, $curl);
-            $curl_handles[] = ['handle' => $curl, 'url' => $url, 'start' => $start];
-        }
-
-        do {
-            curl_multi_exec($multi_handle, $active);
-            curl_multi_select($multi_handle);
-        } while ($active);
-
-        foreach ($curl_handles as $entry) {
-            $curl = $entry['handle'];
-            $url = $entry['url'];
-            $start = $entry['start'];
-            $response = curl_multi_getcontent($curl);
-            $end = microtime(true);
-            $duration = round($end - $start, 4);
-            $info = curl_getinfo($curl);
-            $code = $info['http_code'] ?: self::classify_curl_failure(curl_errno($curl));
-
-            // Extract body for GraphQL error detection
-            // Note: CURLOPT_HEADER is only set when collect_cache_headers is enabled
-            $response_body = $response;
-            if ($this->collect_cache_headers && $response) {
-                $header_size = $info['header_size'];
-                $header = substr($response, 0, $header_size);
-                $response_body = substr($response, $header_size);
-                $this->process_curl_headers($header);
-            }
-
-            // Detect GraphQL errors in response body
-            $graphql_errors = $this->detect_graphql_errors($response_body);
-
-            $message = "⏱ MicroChaos Request | Time: {$duration}s | Code: {$code} | URL: $url | Method: $method";
-            error_log($message);
-
-            if ($log_path) {
-                $this->log_to_file($message, $log_path);
-            }
-
-            if (class_exists('WP_CLI')) {
-                $cache_display = '';
-                if ($this->collect_cache_headers && !empty($this->last_request_cache_headers)) {
-                    $cache_display = ' ' . $this->format_cache_headers_for_display($this->last_request_cache_headers);
-                }
-                $gql_display = $graphql_errors > 0 ? " [GQL errors: {$graphql_errors}]" : '';
-                MicroChaos_Log::log("-> {$code} in {$duration}s{$cache_display}{$gql_display}");
-            }
-
-            $results[] = [
-                'time' => $duration,
-                'code' => $code,
-                'graphql_errors' => $graphql_errors,
-            ];
-
-            curl_multi_remove_handle($multi_handle, $curl);
-            curl_close($curl);
-        }
-
-        curl_multi_close($multi_handle);
-        return $results;
-    }
-
-    /**
      * Fire a single request
      *
      * @param string $url Target URL
@@ -1547,22 +1524,6 @@ class MicroChaos_Request_Generator {
     }
 
     /**
-     * Classify a cURL failure
-     *
-     * A timeout and a refused connection are different findings — one says the
-     * site is slow, the other says it is unreachable — so they get separate
-     * sentinels rather than sharing 'ERROR'.
-     *
-     * @param int $errno cURL error number from curl_errno()
-     * @return string Status sentinel for the result row
-     */
-    private static function classify_curl_failure(int $errno): string {
-        return CURLE_OPERATION_TIMEOUTED === $errno
-            ? self::STATUS_TIMEOUT
-            : self::STATUS_ERROR;
-    }
-
-    /**
      * Classify a WP_Error returned by wp_remote_request()
      *
      * WordPress collapses every transport failure into the single error code
@@ -1597,25 +1558,6 @@ class MicroChaos_Request_Generator {
             case 'checkout': return home_url('/checkout/');
             default: return false;
         }
-    }
-
-    /**
-     * Process headers from cURL response for cache analysis
-     *
-     * @param string $header_text Raw header text from cURL response
-     */
-    private function process_curl_headers(string $header_text): void {
-        $headers = [];
-        foreach(explode("\r\n", $header_text) as $line) {
-            if (strpos($line, ':') !== false) {
-                list($key, $value) = explode(':', $line, 2);
-                $key = strtolower(trim($key));
-                $value = trim($value);
-                $headers[$key] = $value;
-            }
-        }
-
-        $this->collect_cache_header_data($headers);
     }
 
     /**
@@ -2766,6 +2708,15 @@ class MicroChaos_Reporting_Engine {
             MicroChaos_Log::log("📊 Load Test Summary");
             MicroChaos_Log::log("   ═══════════════════════════════════════════════════");
 
+            // The summary is what gets pasted into an audit, so it names the mode
+            // it measured. Without it, three runs produce three near-identical
+            // blocks and only the operator's memory says which is the sizing one.
+            if (!empty($execution_metrics['mode'])) {
+                MicroChaos_Log::log("   Mode: {$execution_metrics['mode']['label']}");
+                MicroChaos_Log::log("     {$execution_metrics['mode']['sizing']}");
+                MicroChaos_Log::log("   ───────────────────────────────────────────────────");
+            }
+
             // Test Execution Metrics section
             if ($execution_metrics) {
                 MicroChaos_Log::log("   Test Execution:");
@@ -3002,6 +2953,9 @@ class MicroChaos_LoadTest_Orchestrator {
             'save_baseline' => null,
             'compare_baseline' => null,
             'log_path' => null,
+            'concurrency' => MicroChaos_Constants::DEFAULT_CONCURRENCY,
+            'results_json' => null,
+            'worker_id' => null,
         ], $config);
     }
 
@@ -3087,10 +3041,13 @@ class MicroChaos_LoadTest_Orchestrator {
         // Log test start
         $this->log_test_start($config, $endpoint_list, $integration_logger);
 
-        // Announce the measurement mode: the two modes answer different questions
-        // and the numbers are not comparable, so the log has to say which ran.
-        if ($config['cache_bust']) {
-            MicroChaos_Log::log("🚫 Cache busting enabled — every request gets a unique URL, so this measures origin cost, not cache performance.");
+        // Announce the measurement mode: the modes answer different questions and
+        // their numbers are not interchangeable, so the log has to say which ran.
+        // Fan-out children are skipped, because the parent labels the ensemble and
+        // a child announcing itself as a sizing run would contradict it.
+        $mode = MicroChaos_Test_Mode::resolve($config);
+        if (empty($config['worker_id'])) {
+            MicroChaos_Test_Mode::announce($mode);
         }
 
         // Warm cache if specified
@@ -3131,6 +3088,7 @@ class MicroChaos_LoadTest_Orchestrator {
             $loop_result['completed'],
             $reporting_engine->get_results()
         );
+        $execution_metrics['mode'] = $mode;
 
         // Handle baseline comparison
         $perf_baseline = $config['compare_baseline']
@@ -3156,12 +3114,21 @@ class MicroChaos_LoadTest_Orchestrator {
             );
         }
 
-        // Display reports
-        $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
+        if (!empty($config['results_json'])) {
+            $this->write_results_json($config['results_json'], $reporting_engine, $loop_result, $cache_analyzer);
+        }
 
-        $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
+        // A worker writing results-json is collected by the parent; printing
+        // a second summary here would interleave with its siblings.
+        if (empty($config['results_json'])) {
+            $reporting_engine->report_summary($perf_baseline, null, $use_thresholds, $execution_metrics);
+        }
 
-        if ($config['resource_logging']) {
+        if (empty($config['results_json'])) {
+            $this->report_timeout_censoring($reporting_engine, $request_generator->get_timeout());
+        }
+
+        if ($config['resource_logging'] && empty($config['results_json'])) {
             $resource_monitor->report_summary($resource_baseline, null, $use_thresholds);
 
             if ($config['resource_trends']) {
@@ -3170,7 +3137,7 @@ class MicroChaos_LoadTest_Orchestrator {
         }
 
         // Save baseline if specified
-        if ($config['save_baseline']) {
+        if ($config['save_baseline'] && empty($config['results_json'])) {
             $reporting_engine->save_baseline($config['save_baseline']);
             if ($config['resource_logging']) {
                 $resource_monitor->save_baseline($config['save_baseline']);
@@ -3179,7 +3146,7 @@ class MicroChaos_LoadTest_Orchestrator {
         }
 
         // Report cache headers if enabled
-        if ($config['collect_cache_headers']) {
+        if ($config['collect_cache_headers'] && empty($config['results_json'])) {
             $cache_analyzer->report_summary($reporting_engine->get_request_count());
         }
 
@@ -3203,6 +3170,41 @@ class MicroChaos_LoadTest_Orchestrator {
             'run_by_duration' => $loop_result['run_by_duration'],
             'actual_minutes' => $loop_result['actual_minutes'],
         ];
+    }
+
+    /**
+     * Write this process's raw results for a parent overlap run to merge.
+     *
+     * @param string $path Absolute path
+     * @param MicroChaos_Reporting_Engine $reporting_engine
+     * @param array<string, mixed> $loop_result
+     * @param MicroChaos_Cache_Analyzer $cache_analyzer
+     */
+    private function write_results_json(string $path, MicroChaos_Reporting_Engine $reporting_engine, array $loop_result, MicroChaos_Cache_Analyzer $cache_analyzer): void {
+        $payload = [
+            'worker_id' => $this->config['worker_id'],
+            'mode' => MicroChaos_Test_Mode::resolve($this->config),
+            'results' => $reporting_engine->get_results(),
+            'completed' => $loop_result['completed'],
+            'run_by_duration' => $loop_result['run_by_duration'],
+            'test_start_timestamp' => $loop_result['test_start_timestamp'],
+            'test_end_timestamp' => $loop_result['test_end_timestamp'],
+            'cache_headers' => $cache_analyzer->get_cache_headers(),
+        ];
+
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0700, true) && !is_dir($dir)) {
+            MicroChaos_Log::error("Could not write results JSON directory: {$dir}");
+        }
+
+        $json = function_exists('wp_json_encode')
+            ? wp_json_encode($payload, JSON_UNESCAPED_SLASHES)
+            : json_encode($payload, JSON_UNESCAPED_SLASHES);
+
+        $written = @file_put_contents($path, $json);
+        if ($written === false) {
+            MicroChaos_Log::error("Could not write results JSON: {$path}");
+        }
     }
 
     /**
@@ -3684,6 +3686,455 @@ class MicroChaos_LoadTest_Orchestrator {
     }
 }
 
+class MicroChaos_Concurrency_Runner {
+
+    /**
+     * Clamp a requested process count to the supported range.
+     *
+     * @param int $requested Requested process count
+     * @return int Clamped count, at least 1 and at most MAX_CONCURRENCY
+     */
+    public static function clamp(int $requested): int {
+        if ($requested < 1) {
+            return 1;
+        }
+
+        if ($requested > MicroChaos_Constants::MAX_CONCURRENCY) {
+            return MicroChaos_Constants::MAX_CONCURRENCY;
+        }
+
+        return $requested;
+    }
+
+    /**
+     * Build the assoc args one child process should receive.
+     *
+     * Forces concurrency=1 so a child cannot fan out again. Points the child
+     * at a results JSON file so the parent can merge without reading interleaved
+     * stdout. Drops warm-cache: the parent warms once, then the children hit.
+     *
+     * @param array<string, mixed> $assoc_args Parent CLI args
+     * @param int $worker_id 1-based worker id
+     * @param string $results_json Absolute path the child should write
+     * @return array<string, mixed> Child assoc args
+     */
+    public static function child_assoc_args(array $assoc_args, int $worker_id, string $results_json): array {
+        $child = $assoc_args;
+        $child['concurrency'] = 1;
+        $child['results-json'] = $results_json;
+        $child['worker-id'] = $worker_id;
+        unset($child['warm-cache']);
+
+        return $child;
+    }
+
+    /**
+     * Format assoc args as a shell-safe WP-CLI flag string.
+     *
+     * @param array<string, mixed> $assoc_args Flags to format
+     * @return string Leading-space flag string, or empty
+     */
+    public static function format_assoc_args(array $assoc_args): string {
+        $parts = [];
+
+        foreach ($assoc_args as $key => $value) {
+            if ($value === false || $value === null) {
+                continue;
+            }
+            if ($value === true) {
+                $parts[] = '--' . $key;
+                continue;
+            }
+            $parts[] = '--' . $key . '=' . escapeshellarg((string) $value);
+        }
+
+        return $parts === [] ? '' : ' ' . implode(' ', $parts);
+    }
+
+    /**
+     * Prefix used to re-invoke WP-CLI as a child.
+     *
+     * Prefers the current argv[0] so a `wp` wrapper stays a `wp` wrapper.
+     * Falls back to `wp` when argv is missing (tests).
+     *
+     * @return string Shell-escaped command prefix, no trailing space
+     */
+    public static function command_prefix(): string {
+        $invoker = $GLOBALS['argv'][0] ?? 'wp';
+
+        if (self::invoker_is_php_script($invoker)) {
+            return escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg($invoker);
+        }
+
+        return escapeshellarg($invoker);
+    }
+
+    /**
+     * Whether the invoker is a PHP script that must be launched via PHP_BINARY.
+     *
+     * @param string $invoker Path from argv[0]
+     * @return bool
+     */
+    public static function invoker_is_php_script(string $invoker): bool {
+        $base = strtolower(basename($invoker));
+
+        return str_ends_with($base, '.php') || str_ends_with($base, '.phar');
+    }
+
+    /**
+     * Fan out, wait, merge, and report. Returns the same shape as execute().
+     *
+     * @param array<string, mixed> $assoc_args Parent CLI args
+     * @param array<string, mixed> $config Parsed config
+     * @return array{completed: int, count: int, run_by_duration: bool, actual_minutes: float}
+     */
+    public function run(array $assoc_args, array $config): array {
+        $n = self::clamp((int) $config['concurrency']);
+
+        if ($n !== (int) $config['concurrency']) {
+            MicroChaos_Log::warning(
+                "⚠️ --concurrency={$config['concurrency']} exceeds the cap of "
+                . MicroChaos_Constants::MAX_CONCURRENCY
+                . "; running {$n} processes."
+            );
+        }
+
+        $mode = MicroChaos_Test_Mode::resolve(['concurrency' => $n]);
+        MicroChaos_Test_Mode::announce($mode);
+        MicroChaos_Log::log("   Each process runs the sequential test; the overlap is the ensemble.");
+
+        if (!empty($config['warm_cache'])) {
+            $this->warm_once($config);
+        }
+
+        $tmp = $this->make_temp_dir();
+        $handles = $this->launch($assoc_args, $n, $tmp);
+        $this->wait($handles);
+        $payloads = $this->read_payloads($handles);
+
+        $this->report_merged($payloads, $n);
+
+        $completed = 0;
+        $run_by_duration = false;
+        foreach ($payloads as $payload) {
+            $completed += (int) ($payload['completed'] ?? 0);
+            $run_by_duration = $run_by_duration || !empty($payload['run_by_duration']);
+        }
+
+        return [
+            'completed' => $completed,
+            'count' => $config['count'] * $n,
+            'run_by_duration' => $run_by_duration,
+            'actual_minutes' => $this->merged_minutes($payloads),
+        ];
+    }
+
+    /**
+     * Fire one warm request per endpoint in the parent, before children launch.
+     *
+     * @param array<string, mixed> $config Parsed config
+     */
+    private function warm_once(array $config): void {
+        MicroChaos_Log::log("🧤 Warming once in the parent, then launching children without --warm-cache.");
+
+        $generator = new MicroChaos_Request_Generator([
+            'collect_cache_headers' => !empty($config['collect_cache_headers']),
+            'timeout' => $config['timeout'] ?? MicroChaos_Constants::DEFAULT_REQUEST_TIMEOUT,
+        ]);
+        $endpoints = $this->endpoints_for_warm($generator, $config);
+        foreach ($endpoints as $endpoint_item) {
+            $generator->fire_request($endpoint_item['url'], null, null, $config['method'] ?? 'GET', null);
+            MicroChaos_Log::log("  Warmed {$endpoint_item['slug']}");
+        }
+    }
+
+    /**
+     * Resolve endpoints for the parent warm pass.
+     *
+     * @param MicroChaos_Request_Generator $generator Request generator
+     * @param array<string, mixed> $config Parsed config
+     * @return array<int, array{url: string, slug: string}>
+     */
+    private function endpoints_for_warm(MicroChaos_Request_Generator $generator, array $config): array {
+        $orchestrator = new MicroChaos_LoadTest_Orchestrator($config);
+        $method = new \ReflectionMethod($orchestrator, 'resolve_endpoints');
+
+        return $method->invoke($orchestrator, $generator, $config);
+    }
+
+    /**
+     * @return string Absolute temp directory
+     */
+    private function make_temp_dir(): string {
+        $tmp = rtrim(sys_get_temp_dir(), '/') . '/microchaos-' . uniqid('', true);
+        if (!@mkdir($tmp, 0700) && !is_dir($tmp)) {
+            MicroChaos_Log::error("Could not create temp dir for overlap workers: {$tmp}");
+        }
+
+        return $tmp;
+    }
+
+    /**
+     * Launch N children. Returns handles the waiter understands.
+     *
+     * @param array<string, mixed> $assoc_args Parent CLI args
+     * @param int $n Process count
+     * @param string $tmp Temp directory
+     * @return array<int, array{proc: resource|false, json: string, id: int, cmd: string}>
+     */
+    private function launch(array $assoc_args, int $n, string $tmp): array {
+        if (!function_exists('proc_open')) {
+            MicroChaos_Log::error(
+                "proc_open is disabled, so --concurrency cannot launch workers. "
+                . "Run the sequential test, or background N `wp microchaos loadtest --count=1` processes yourself."
+            );
+        }
+
+        $globals = $this->runtime_globals();
+        $prefix = self::command_prefix();
+        $handles = [];
+
+        for ($i = 1; $i <= $n; $i++) {
+            $json = $tmp . '/worker-' . $i . '.json';
+            $child = array_merge($globals, self::child_assoc_args($assoc_args, $i, $json));
+            $cmd = $prefix . ' microchaos loadtest' . self::format_assoc_args($child);
+            $out = $tmp . '/worker-' . $i . '.out';
+            $err = $tmp . '/worker-' . $i . '.err';
+
+            $descriptors = [
+                0 => ['file', '/dev/null', 'r'],
+                1 => ['file', $out, 'w'],
+                2 => ['file', $err, 'w'],
+            ];
+
+            $proc = proc_open($cmd, $descriptors, $pipes, null, null);
+            $handles[] = [
+                'proc' => $proc,
+                'json' => $json,
+                'id' => $i,
+                'cmd' => $cmd,
+                'err' => $err,
+            ];
+        }
+
+        return $handles;
+    }
+
+    /**
+     * WP-CLI global flags the children must inherit or they hit the wrong site.
+     *
+     * @return array<string, mixed>
+     */
+    private function runtime_globals(): array {
+        $globals = [];
+
+        if (!class_exists('WP_CLI')) {
+            return $globals;
+        }
+
+        $config = \WP_CLI::get_runner()->config;
+        foreach (['path', 'url', 'user'] as $key) {
+            if (!empty($config[$key])) {
+                $globals[$key] = $config[$key];
+            }
+        }
+        if (!empty($config['allow-root'])) {
+            $globals['allow-root'] = true;
+        }
+
+        return $globals;
+    }
+
+    /**
+     * Wait for every child, then terminate stragglers.
+     *
+     * @param array<int, array{proc: resource|false, json: string, id: int}> $handles
+     */
+    private function wait(array $handles): void {
+        $deadline = time() + MicroChaos_Constants::DEFAULT_PARALLEL_TIMEOUT;
+
+        while (time() < $deadline) {
+            $alive = 0;
+            foreach ($handles as $handle) {
+                if ($handle['proc'] === false) {
+                    continue;
+                }
+                $status = proc_get_status($handle['proc']);
+                if (!empty($status['running'])) {
+                    $alive++;
+                }
+            }
+            if ($alive === 0) {
+                break;
+            }
+            usleep(100000);
+        }
+
+        foreach ($handles as $handle) {
+            if ($handle['proc'] === false) {
+                continue;
+            }
+            $status = proc_get_status($handle['proc']);
+            if (!empty($status['running'])) {
+                proc_terminate($handle['proc']);
+                MicroChaos_Log::warning("⚠️ Worker {$handle['id']} exceeded the overlap timeout and was terminated.");
+            }
+            proc_close($handle['proc']);
+        }
+    }
+
+    /**
+     * @param array<int, array{json: string, id: int, err?: string}> $handles
+     * @return array<int, array<string, mixed>>
+     */
+    private function read_payloads(array $handles): array {
+        $payloads = [];
+
+        foreach ($handles as $handle) {
+            if (!is_readable($handle['json'])) {
+                $tail = '';
+                if (!empty($handle['err']) && is_readable($handle['err'])) {
+                    $tail = trim((string) file_get_contents($handle['err']));
+                    if (strlen($tail) > 300) {
+                        $tail = substr($tail, -300);
+                    }
+                }
+                MicroChaos_Log::warning(
+                    "⚠️ Worker {$handle['id']} produced no results file."
+                    . ($tail !== '' ? " stderr: {$tail}" : '')
+                );
+                continue;
+            }
+
+            $decoded = json_decode((string) file_get_contents($handle['json']), true);
+            if (!is_array($decoded) || !isset($decoded['results']) || !is_array($decoded['results'])) {
+                MicroChaos_Log::warning("⚠️ Worker {$handle['id']} wrote unreadable results JSON.");
+                continue;
+            }
+
+            $payloads[] = $decoded;
+        }
+
+        if ($payloads === []) {
+            MicroChaos_Log::error("No overlap workers returned results. The sequential path is unchanged; re-run without --concurrency.");
+        }
+
+        return $payloads;
+    }
+
+    /**
+     * Merge worker results and print one summary. No serial-ceiling projection:
+     * those numbers describe one-at-a-time cost and are a lie under overlap.
+     *
+     * @param array<int, array<string, mixed>> $payloads
+     * @param int $n Process count
+     */
+    private function report_merged(array $payloads, int $n): void {
+        $engine = new MicroChaos_Reporting_Engine();
+        $starts = [];
+        $ends = [];
+        $completed = 0;
+
+        foreach ($payloads as $payload) {
+            $engine->add_results($payload['results']);
+            $completed += (int) ($payload['completed'] ?? count($payload['results']));
+            if (isset($payload['test_start_timestamp'])) {
+                $starts[] = (float) $payload['test_start_timestamp'];
+            }
+            if (isset($payload['test_end_timestamp'])) {
+                $ends[] = (float) $payload['test_end_timestamp'];
+            }
+        }
+
+        $start = $starts === [] ? microtime(true) : min($starts);
+        $end = $ends === [] ? $start : max($ends);
+        $duration = max(0.0, $end - $start);
+        $rps = $duration > 0 ? round($completed / $duration, 2) : 0.0;
+
+        $metrics = [
+            'started_at' => date('Y-m-d H:i:s', (int) $start),
+            'started_at_iso' => date('c', (int) $start),
+            'ended_at' => date('Y-m-d H:i:s', (int) $end),
+            'ended_at_iso' => date('c', (int) $end),
+            'duration_seconds' => round($duration, 2),
+            'duration_formatted' => $this->format_duration($duration),
+            'total_requests' => $completed,
+            'throughput_rps' => $rps,
+            'mode' => MicroChaos_Test_Mode::resolve(['concurrency' => $n]),
+        ];
+
+        $engine->report_summary(null, null, null, $metrics);
+
+        $this->report_merged_cache($payloads, $completed);
+    }
+
+    /**
+     * Rebuild the cache-header tally from workers so a stampede still shows
+     * HIT vs regen instead of losing it behind --results-json.
+     *
+     * @param array<int, array<string, mixed>> $payloads
+     * @param int $completed Combined request count
+     */
+    private function report_merged_cache(array $payloads, int $completed): void {
+        $analyzer = new MicroChaos_Cache_Analyzer();
+        $has_cache = false;
+
+        foreach ($payloads as $payload) {
+            if (empty($payload['cache_headers']) || !is_array($payload['cache_headers'])) {
+                continue;
+            }
+            foreach ($payload['cache_headers'] as $header => $values) {
+                if (!is_array($values)) {
+                    continue;
+                }
+                foreach ($values as $value => $header_count) {
+                    $has_cache = true;
+                    $analyzer->collect_headers([$header => (string) $value], (int) $header_count);
+                }
+            }
+        }
+
+        if ($has_cache) {
+            $analyzer->report_summary($completed);
+        }
+    }
+
+    /**
+     * @param array<int, array<string, mixed>> $payloads
+     */
+    private function merged_minutes(array $payloads): float {
+        $starts = [];
+        $ends = [];
+        foreach ($payloads as $payload) {
+            if (isset($payload['test_start_timestamp'])) {
+                $starts[] = (float) $payload['test_start_timestamp'];
+            }
+            if (isset($payload['test_end_timestamp'])) {
+                $ends[] = (float) $payload['test_end_timestamp'];
+            }
+        }
+        if ($starts === [] || $ends === []) {
+            return 0.0;
+        }
+
+        return round((max($ends) - min($starts)) / MicroChaos_Constants::SECONDS_PER_MINUTE, 1);
+    }
+
+    /**
+     * @param float $seconds Duration in seconds
+     */
+    private function format_duration(float $seconds): string {
+        $minutes = floor($seconds / 60);
+        $secs = (int) round($seconds % 60);
+
+        if ($minutes > 0) {
+            return "{$minutes}m {$secs}s";
+        }
+
+        return "{$secs}s";
+    }
+}
+
 class MicroChaos_Commands {
     /**
      * Register WP-CLI commands
@@ -3739,7 +4190,8 @@ class MicroChaos_Commands {
      *   When specified, this takes precedence over --count option.
      *
      * [--burst=<number>]
-     * : Number of concurrent requests to fire per burst. Default: 10
+     * : Number of sequential requests to fire back-to-back before the delay.
+     *   This is pacing, not concurrency. Default: 10
      *
      * [--delay=<seconds>]
      * : Delay between bursts in seconds. Default: 2
@@ -3784,8 +4236,19 @@ class MicroChaos_Commands {
      * : Shorthand for GraphQL testing. Sets method=POST and endpoint=/graphql if not specified.
      *   Use with --body to provide your GraphQL query.
      *
+     * [--concurrency=<number>]
+     * : Launch this many sequential loadtest processes at the same instant so
+     *   requests actually overlap. Default: 1 (no fan-out). Capped at 8.
+     *   --count and --duration are per process: `--count=1 --concurrency=4`
+     *   is a four-request stampede. Combined Throughput is not a Phase 4 RPS;
+     *   size on a sequential `--cache-bust` run.
+     *
+     * [--results-json=<path>]
+     * : Write this process's raw results as JSON and skip the printed summary.
+     *   Used by `--concurrency` workers; also useful on its own for scripts.
+     *
      * [--rampup]
-     * : Gradually increase the number of concurrent requests from 1 up to the burst limit.
+     * : Gradually increase the number of back-to-back requests from 1 up to the burst limit.
      *
      * [--timeout=<seconds>]
      * : Seconds to wait for a response before abandoning the request. Default: 30.
@@ -3891,6 +4354,15 @@ class MicroChaos_Commands {
      *     # subtracted from the per-site CPU reading before sizing workers from it.
      *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging
      *
+     *     # Overlap: four one-shot processes against a never-seen URL (stampede).
+     *     # All regenerating means no cache lock. Size workers from a sequential
+     *     # --cache-bust run, not from this Throughput figure.
+     *     wp microchaos loadtest --endpoint=custom:/fresh-page/ --count=1 --cache-bust --concurrency=4
+     *
+     *     # Control: same N against a URL you already warmed. A HIT/regen split
+     *     # is a race in the cache-validity check, not launch noise.
+     *     wp microchaos loadtest --endpoint=home --count=1 --warm-cache --cache-headers --concurrency=4
+     *
      *     # Give a slow endpoint room to answer, so the tail is measured rather
      *     # than cut off and recounted as an error.
      *     wp microchaos loadtest --endpoint=custom:/checkout/ --duration=5 --timeout=60
@@ -3920,9 +4392,13 @@ class MicroChaos_Commands {
         // Build config from CLI options
         $config = $this->parse_options($assoc_args);
 
-        // Create and execute orchestrator
-        $orchestrator = new MicroChaos_LoadTest_Orchestrator($config);
-        $result = $orchestrator->execute();
+        if ($config['concurrency'] > 1) {
+            $runner = new MicroChaos_Concurrency_Runner();
+            $result = $runner->run($assoc_args, $config);
+        } else {
+            $orchestrator = new MicroChaos_LoadTest_Orchestrator($config);
+            $result = $orchestrator->execute();
+        }
 
         // Final success message
         if ($result['run_by_duration']) {
@@ -3984,6 +4460,9 @@ class MicroChaos_Commands {
             'save_baseline' => $save_baseline,
             'compare_baseline' => $compare_baseline,
             'log_path' => $assoc_args['log-to'] ?? null,
+            'concurrency' => intval($assoc_args['concurrency'] ?? MicroChaos_Constants::DEFAULT_CONCURRENCY),
+            'results_json' => $assoc_args['results-json'] ?? null,
+            'worker_id' => isset($assoc_args['worker-id']) ? intval($assoc_args['worker-id']) : null,
         ];
     }
 }

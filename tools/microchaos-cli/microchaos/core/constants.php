@@ -40,6 +40,17 @@ class MicroChaos_Constants {
     const DEFAULT_WORKERS = 3;
 
     /**
+     * Default --concurrency. 1 is the sequential path; nothing fans out.
+     */
+    const DEFAULT_CONCURRENCY = 1;
+
+    /**
+     * Hard cap on --concurrency. Staging boxes are 5 workers; past 8 the
+     * generators themselves start to be the thing under test.
+     */
+    const MAX_CONCURRENCY = 8;
+
+    /**
      * Time conversion constants
      */
     const SECONDS_PER_MINUTE = 60;

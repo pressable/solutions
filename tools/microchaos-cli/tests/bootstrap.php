@@ -85,6 +85,9 @@ function wp_generate_uuid4(): string {
 // Core constants (other components may reference these)
 require_once MICROCHAOS_CORE_PATH . '/constants.php';
 
+// Test-mode descriptor: pure config-to-label mapping, no runtime needed.
+require_once MICROCHAOS_CORE_PATH . '/test-mode.php';
+
 // Interfaces (load before implementations)
 require_once MICROCHAOS_CORE_PATH . '/interfaces/logger.php';
 require_once MICROCHAOS_CORE_PATH . '/interfaces/baseline-storage.php';
@@ -121,6 +124,9 @@ require_once MICROCHAOS_CORE_PATH . '/resource-monitor.php';
 
 // Orchestrator: throughput arithmetic is pure PHP and reachable without a run.
 require_once MICROCHAOS_CORE_PATH . '/orchestrators/loadtest-orchestrator.php';
+
+// Concurrency runner: clamp / child-arg / flag formatting are pure PHP.
+require_once MICROCHAOS_CORE_PATH . '/concurrency-runner.php';
 
 /**
  * WordPress Stubs - Classes

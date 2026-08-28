@@ -71,6 +71,9 @@ class MicroChaos_Bootstrap {
         // Load constants first
         require_once MICROCHAOS_CORE_PATH . '/constants.php';
 
+        // Load the test-mode descriptor before anything that reports a run
+        require_once MICROCHAOS_CORE_PATH . '/test-mode.php';
+
         // Load interfaces (order matters - logger before components that use it)
         require_once MICROCHAOS_CORE_PATH . '/interfaces/logger.php';
         require_once MICROCHAOS_CORE_PATH . '/interfaces/baseline-storage.php';
@@ -97,6 +100,7 @@ class MicroChaos_Bootstrap {
             'cache-analyzer.php',
             'resource-monitor.php',
             'reporting-engine.php',
+            'concurrency-runner.php',
             'commands.php',  // Must be last - depends on orchestrators
         ];
 

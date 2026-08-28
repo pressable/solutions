@@ -95,27 +95,9 @@ class RequestGeneratorTimeoutTest extends TestCase
     // Failure classification
     // =========================================================================
 
-    #[Test]
-    public function a_curl_timeout_is_labelled_as_a_timeout(): void
-    {
-        $this->assertSame(
-            \MicroChaos_Request_Generator::STATUS_TIMEOUT,
-            $this->classify('classify_curl_failure', CURLE_OPERATION_TIMEOUTED)
-        );
-    }
-
-    #[Test]
-    public function other_curl_failures_stay_generic_errors(): void
-    {
-        // A refused connection or an unresolvable host is a different finding
-        // from a slow response and must not be reported as one.
-        foreach ([CURLE_COULDNT_CONNECT, CURLE_COULDNT_RESOLVE_HOST] as $errno) {
-            $this->assertSame(
-                \MicroChaos_Request_Generator::STATUS_ERROR,
-                $this->classify('classify_curl_failure', $errno)
-            );
-        }
-    }
+    // The cURL classifier was removed with fire_requests_async() in 4.2.0. Every
+    // request now goes through wp_remote_request(), so the WP_Error path below is
+    // the only classification the tool performs.
 
     #[Test]
     public function a_wp_error_mentioning_a_timeout_is_labelled_as_a_timeout(): void

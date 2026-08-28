@@ -69,7 +69,8 @@ class MicroChaos_Commands {
      *   When specified, this takes precedence over --count option.
      *
      * [--burst=<number>]
-     * : Number of concurrent requests to fire per burst. Default: 10
+     * : Number of sequential requests to fire back-to-back before the delay.
+     *   This is pacing, not concurrency. Default: 10
      *
      * [--delay=<seconds>]
      * : Delay between bursts in seconds. Default: 2
@@ -114,8 +115,19 @@ class MicroChaos_Commands {
      * : Shorthand for GraphQL testing. Sets method=POST and endpoint=/graphql if not specified.
      *   Use with --body to provide your GraphQL query.
      *
+     * [--concurrency=<number>]
+     * : Launch this many sequential loadtest processes at the same instant so
+     *   requests actually overlap. Default: 1 (no fan-out). Capped at 8.
+     *   --count and --duration are per process: `--count=1 --concurrency=4`
+     *   is a four-request stampede. Combined Throughput is not a Phase 4 RPS;
+     *   size on a sequential `--cache-bust` run.
+     *
+     * [--results-json=<path>]
+     * : Write this process's raw results as JSON and skip the printed summary.
+     *   Used by `--concurrency` workers; also useful on its own for scripts.
+     *
      * [--rampup]
-     * : Gradually increase the number of concurrent requests from 1 up to the burst limit.
+     * : Gradually increase the number of back-to-back requests from 1 up to the burst limit.
      *
      * [--timeout=<seconds>]
      * : Seconds to wait for a response before abandoning the request. Default: 30.
@@ -221,6 +233,15 @@ class MicroChaos_Commands {
      *     # subtracted from the per-site CPU reading before sizing workers from it.
      *     wp microchaos loadtest --endpoint=home --duration=10 --resource-logging
      *
+     *     # Overlap: four one-shot processes against a never-seen URL (stampede).
+     *     # All regenerating means no cache lock. Size workers from a sequential
+     *     # --cache-bust run, not from this Throughput figure.
+     *     wp microchaos loadtest --endpoint=custom:/fresh-page/ --count=1 --cache-bust --concurrency=4
+     *
+     *     # Control: same N against a URL you already warmed. A HIT/regen split
+     *     # is a race in the cache-validity check, not launch noise.
+     *     wp microchaos loadtest --endpoint=home --count=1 --warm-cache --cache-headers --concurrency=4
+     *
      *     # Give a slow endpoint room to answer, so the tail is measured rather
      *     # than cut off and recounted as an error.
      *     wp microchaos loadtest --endpoint=custom:/checkout/ --duration=5 --timeout=60
@@ -250,9 +271,13 @@ class MicroChaos_Commands {
         // Build config from CLI options
         $config = $this->parse_options($assoc_args);
 
-        // Create and execute orchestrator
-        $orchestrator = new MicroChaos_LoadTest_Orchestrator($config);
-        $result = $orchestrator->execute();
+        if ($config['concurrency'] > 1) {
+            $runner = new MicroChaos_Concurrency_Runner();
+            $result = $runner->run($assoc_args, $config);
+        } else {
+            $orchestrator = new MicroChaos_LoadTest_Orchestrator($config);
+            $result = $orchestrator->execute();
+        }
 
         // Final success message
         if ($result['run_by_duration']) {
@@ -314,6 +339,9 @@ class MicroChaos_Commands {
             'save_baseline' => $save_baseline,
             'compare_baseline' => $compare_baseline,
             'log_path' => $assoc_args['log-to'] ?? null,
+            'concurrency' => intval($assoc_args['concurrency'] ?? MicroChaos_Constants::DEFAULT_CONCURRENCY),
+            'results_json' => $assoc_args['results-json'] ?? null,
+            'worker_id' => isset($assoc_args['worker-id']) ? intval($assoc_args['worker-id']) : null,
         ];
     }
 }
