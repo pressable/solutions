@@ -44,6 +44,10 @@ stampede races, HIT/regen splits on an already-warm URL).
 - Sequential default is unchanged. Existing 4.1.0 commands keep their numbers.
 - Every run now names its **test mode**, on screen as it starts and again in the
   summary, so a pasted report says what it measured.
+- The orphaned `fire_requests_async()` curl_multi implementation is **deleted**.
+  It had been unreferenced since v3.0.0 and kept implying the tool had
+  concurrency it was choosing not to use. Fan-out replaces it; do not
+  reintroduce the one-process curl_multi path.
 
 ### Test modes
 

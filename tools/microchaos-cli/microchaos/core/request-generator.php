@@ -108,129 +108,6 @@ class MicroChaos_Request_Generator {
     }
 
     /**
-     * Fire an asynchronous batch of requests
-     *
-     * @param string $url Target URL
-     * @param string|null $log_path Optional path for logging
-     * @param array|null $cookies Optional cookies for authentication
-     * @param int $current_burst Number of concurrent requests to fire
-     * @param string $method HTTP method
-     * @param string|null $body Request body for POST/PUT
-     * @return array<int, array{time: float, code: int|string}> Results of the requests
-     */
-    public function fire_requests_async(string $url, ?string $log_path, ?array $cookies, int $current_burst, string $method = 'GET', ?string $body = null): array {
-        $results = [];
-        $multi_handle = curl_multi_init();
-        $curl_handles = [];
-
-        for ($i = 0; $i < $current_burst; $i++) {
-            $curl = curl_init($url);
-            curl_setopt($curl, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($curl, CURLOPT_TIMEOUT, $this->timeout);
-            curl_setopt($curl, CURLOPT_CUSTOMREQUEST, $method);
-            
-            // Prepare headers array
-            $headers = [
-                'User-Agent: ' . $this->get_user_agent(),
-            ];
-            
-            // Add custom headers if any
-            if (!empty($this->custom_headers)) {
-                foreach ($this->custom_headers as $name => $value) {
-                    $headers[] = "$name: $value";
-                }
-            }
-            
-            curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-
-            // For cache header collection
-            if ($this->collect_cache_headers) {
-                curl_setopt($curl, CURLOPT_HEADER, true);
-            }
-
-            // Handle body data
-            if ($body) {
-                if ($this->is_json($body)) {
-                    // Add content-type header to existing headers
-                    $headers[] = 'Content-Type: application/json';
-                    curl_setopt($curl, CURLOPT_HTTPHEADER, $headers);
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
-                } else {
-                    curl_setopt($curl, CURLOPT_POSTFIELDS, $body);
-                }
-            }
-
-            if ($cookies) {
-                $selected = MicroChaos_Authentication_Manager::is_multi_auth($cookies)
-                    ? MicroChaos_Authentication_Manager::select_random_session($cookies)
-                    : $cookies;
-                curl_setopt($curl, CURLOPT_COOKIE, MicroChaos_Authentication_Manager::format_for_curl($selected));
-            }
-            curl_setopt($curl, CURLOPT_URL, $url);
-            $start = microtime(true); // record start time for this request
-            curl_multi_add_handle($multi_handle, $curl);
-            $curl_handles[] = ['handle' => $curl, 'url' => $url, 'start' => $start];
-        }
-
-        do {
-            curl_multi_exec($multi_handle, $active);
-            curl_multi_select($multi_handle);
-        } while ($active);
-
-        foreach ($curl_handles as $entry) {
-            $curl = $entry['handle'];
-            $url = $entry['url'];
-            $start = $entry['start'];
-            $response = curl_multi_getcontent($curl);
-            $end = microtime(true);
-            $duration = round($end - $start, 4);
-            $info = curl_getinfo($curl);
-            $code = $info['http_code'] ?: self::classify_curl_failure(curl_errno($curl));
-
-            // Extract body for GraphQL error detection
-            // Note: CURLOPT_HEADER is only set when collect_cache_headers is enabled
-            $response_body = $response;
-            if ($this->collect_cache_headers && $response) {
-                $header_size = $info['header_size'];
-                $header = substr($response, 0, $header_size);
-                $response_body = substr($response, $header_size);
-                $this->process_curl_headers($header);
-            }
-
-            // Detect GraphQL errors in response body
-            $graphql_errors = $this->detect_graphql_errors($response_body);
-
-            $message = "⏱ MicroChaos Request | Time: {$duration}s | Code: {$code} | URL: $url | Method: $method";
-            error_log($message);
-
-            if ($log_path) {
-                $this->log_to_file($message, $log_path);
-            }
-
-            if (class_exists('WP_CLI')) {
-                $cache_display = '';
-                if ($this->collect_cache_headers && !empty($this->last_request_cache_headers)) {
-                    $cache_display = ' ' . $this->format_cache_headers_for_display($this->last_request_cache_headers);
-                }
-                $gql_display = $graphql_errors > 0 ? " [GQL errors: {$graphql_errors}]" : '';
-                MicroChaos_Log::log("-> {$code} in {$duration}s{$cache_display}{$gql_display}");
-            }
-
-            $results[] = [
-                'time' => $duration,
-                'code' => $code,
-                'graphql_errors' => $graphql_errors,
-            ];
-
-            curl_multi_remove_handle($multi_handle, $curl);
-            curl_close($curl);
-        }
-
-        curl_multi_close($multi_handle);
-        return $results;
-    }
-
-    /**
      * Fire a single request
      *
      * @param string $url Target URL
@@ -321,22 +198,6 @@ class MicroChaos_Request_Generator {
     }
 
     /**
-     * Classify a cURL failure
-     *
-     * A timeout and a refused connection are different findings — one says the
-     * site is slow, the other says it is unreachable — so they get separate
-     * sentinels rather than sharing 'ERROR'.
-     *
-     * @param int $errno cURL error number from curl_errno()
-     * @return string Status sentinel for the result row
-     */
-    private static function classify_curl_failure(int $errno): string {
-        return CURLE_OPERATION_TIMEOUTED === $errno
-            ? self::STATUS_TIMEOUT
-            : self::STATUS_ERROR;
-    }
-
-    /**
      * Classify a WP_Error returned by wp_remote_request()
      *
      * WordPress collapses every transport failure into the single error code
@@ -371,25 +232,6 @@ class MicroChaos_Request_Generator {
             case 'checkout': return home_url('/checkout/');
             default: return false;
         }
-    }
-
-    /**
-     * Process headers from cURL response for cache analysis
-     *
-     * @param string $header_text Raw header text from cURL response
-     */
-    private function process_curl_headers(string $header_text): void {
-        $headers = [];
-        foreach(explode("\r\n", $header_text) as $line) {
-            if (strpos($line, ':') !== false) {
-                list($key, $value) = explode(':', $line, 2);
-                $key = strtolower(trim($key));
-                $value = trim($value);
-                $headers[$key] = $value;
-            }
-        }
-
-        $this->collect_cache_header_data($headers);
     }
 
     /**

@@ -3,9 +3,17 @@
  * Concurrency Runner
  *
  * Overlap is N independent WP-CLI processes launched at the same instant,
- * each running the existing sequential loadtest. One process cannot overlap
- * (`--burst` is pacing; fire_requests_async() is unused). This is the method
- * that produced real overlap on Pressable — not curl_multi in one process.
+ * each running the existing sequential loadtest. One process cannot overlap:
+ * `--burst` is pacing, not concurrency.
+ *
+ * curl_multi inside one process was tried and rejected. Pressable's loopback
+ * serializes it, so the requests do not actually overlap and the run looks
+ * like an ordinary sequential test with worse bookkeeping. v3.0.0 shipped that
+ * mechanism as `--concurrency` and removed it for the same reason. The dead
+ * implementation (`fire_requests_async()`) survived until 4.2.0 and was
+ * deleted with this feature, because leaving it there kept suggesting the tool
+ * had concurrency it was declining to use. Process fan-out is the method that
+ * produced real overlap on Pressable; do not reintroduce the curl_multi path.
  *
  * --count / --duration are per process. --count=1 --concurrency=4 is a
  * four-request stampede. Combined wall-clock throughput is not a Phase 4 RPS.
