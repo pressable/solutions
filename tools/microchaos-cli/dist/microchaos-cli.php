@@ -3,7 +3,7 @@
  * Plugin Name: MicroChaos CLI Load Tester
  * Description: Internal WP-CLI based WordPress load tester for staging environments where
  * external load testing is restricted (like Pressable).
- * Version: 4.2.0
+ * Version: 4.2.1
  * Author: Phill
  * License: GPL-3.0-or-later
  *
@@ -15,7 +15,7 @@
 // Bootstrap MicroChaos components
 
 /**
- * COMPILED SINGLE-FILE VERSION - MicroChaos 4.2.0
+ * COMPILED SINGLE-FILE VERSION - MicroChaos 4.2.1
  * 
  * This is an automatically generated file - DO NOT EDIT DIRECTLY
  * Make changes to the modular version and rebuild with: node build.js
@@ -24,7 +24,7 @@
 if (defined('WP_CLI') && WP_CLI) {
 
     if (!defined('MICROCHAOS_VERSION')) {
-        define('MICROCHAOS_VERSION', '4.2.0');
+        define('MICROCHAOS_VERSION', '4.2.1');
     }
 
 class MicroChaos_Constants {
