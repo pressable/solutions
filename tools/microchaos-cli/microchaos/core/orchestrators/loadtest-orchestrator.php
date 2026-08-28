@@ -161,10 +161,13 @@ class MicroChaos_LoadTest_Orchestrator {
         // Log test start
         $this->log_test_start($config, $endpoint_list, $integration_logger);
 
-        // Announce the measurement mode: the two modes answer different questions
-        // and the numbers are not comparable, so the log has to say which ran.
-        if ($config['cache_bust']) {
-            MicroChaos_Log::log("🚫 Cache busting enabled — every request gets a unique URL, so this measures origin cost, not cache performance.");
+        // Announce the measurement mode: the modes answer different questions and
+        // their numbers are not interchangeable, so the log has to say which ran.
+        // Fan-out children are skipped, because the parent labels the ensemble and
+        // a child announcing itself as a sizing run would contradict it.
+        $mode = MicroChaos_Test_Mode::resolve($config);
+        if (empty($config['worker_id'])) {
+            MicroChaos_Test_Mode::announce($mode);
         }
 
         // Warm cache if specified
@@ -205,6 +208,7 @@ class MicroChaos_LoadTest_Orchestrator {
             $loop_result['completed'],
             $reporting_engine->get_results()
         );
+        $execution_metrics['mode'] = $mode;
 
         // Handle baseline comparison
         $perf_baseline = $config['compare_baseline']
@@ -299,6 +303,7 @@ class MicroChaos_LoadTest_Orchestrator {
     private function write_results_json(string $path, MicroChaos_Reporting_Engine $reporting_engine, array $loop_result, MicroChaos_Cache_Analyzer $cache_analyzer): void {
         $payload = [
             'worker_id' => $this->config['worker_id'],
+            'mode' => MicroChaos_Test_Mode::resolve($this->config),
             'results' => $reporting_engine->get_results(),
             'completed' => $loop_result['completed'],
             'run_by_duration' => $loop_result['run_by_duration'],

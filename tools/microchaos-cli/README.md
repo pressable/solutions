@@ -42,6 +42,36 @@ stampede races, HIT/regen splits on an already-warm URL).
 - Combined Throughput from an overlap run is **not** a Phase 4 RPS. Size on a
   sequential `--cache-bust` run. The summary says so.
 - Sequential default is unchanged. Existing 4.1.0 commands keep their numbers.
+- Every run now names its **test mode**, on screen as it starts and again in the
+  summary, so a pasted report says what it measured.
+
+### Test modes
+
+Three runs answer three different questions, and their numbers are not
+interchangeable. The mode is printed before the run and repeated in the summary
+block, so an operator reading a report later does not have to reconstruct which
+flags produced it.
+
+| Mode | Flags | Measures | Sizing input |
+|------|-------|----------|--------------|
+| Origin cost | `--cache-bust` | What one uncached request costs the origin | Yes, this is the Phase 4 input |
+| Cache effectiveness | `--warm-cache` | What the cache serves once the URL is warm | No, compare it against the origin-cost run |
+| Overlap | `--concurrency=N` | How the site behaves when requests share workers | No, combined Throughput mixes queueing and N generators |
+
+A sequential run with neither cache flag is labelled `Sequential, cache state not
+controlled` and flagged as a warning. It is a mix of hits and misses in unknown
+proportion, so it answers neither question.
+
+```bash
+# Run 1 — origin cost, the number Phase 4 sizes on
+wp microchaos loadtest --endpoint=home --duration=2 --cache-bust --cache-headers
+
+# Run 2 — what the cache is buying
+wp microchaos loadtest --endpoint=home --duration=2 --warm-cache --cache-headers
+
+# Run 3 — overlap, four processes at the same instant
+wp microchaos loadtest --endpoint=home --count=5 --concurrency=4 --cache-headers
+```
 
 ## 🆕 What's New in v4.1.0 "Ground Truth"
 

@@ -19,6 +19,8 @@ const sources = {
   components: [
     // Load constants first
     path.join(__dirname, "microchaos/core/constants.php"),
+    // Load the test-mode descriptor before anything that reports a run
+    path.join(__dirname, "microchaos/core/test-mode.php"),
     // Load interfaces (logger first - used by all components)
     path.join(__dirname, "microchaos/core/interfaces/logger.php"),
     path.join(__dirname, "microchaos/core/interfaces/baseline-storage.php"),

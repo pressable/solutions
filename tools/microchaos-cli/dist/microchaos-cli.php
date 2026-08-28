@@ -79,6 +79,95 @@ class MicroChaos_Constants {
     const HTTP_SERVER_ERROR = 500;
 }
 
+class MicroChaos_Test_Mode {
+
+    /**
+     * Resolve the mode descriptor for a run.
+     *
+     * @param array<string, mixed> $config Parsed config
+     * @return array{id: string, label: string, measures: string, sizing: string, sizing_ok: bool}
+     */
+    public static function resolve(array $config): array {
+        $concurrency = (int) ($config['concurrency'] ?? 1);
+
+        if ($concurrency > 1) {
+            return [
+                'id' => 'overlap',
+                'label' => "Overlap ({$concurrency} processes launched together)",
+                'measures' => 'How the site behaves when requests actually share workers.',
+                'sizing' => 'Not a sizing input. Combined Throughput mixes queueing and '
+                    . "{$concurrency} load generators into one figure.",
+                'sizing_ok' => false,
+            ];
+        }
+
+        $cache_bust = !empty($config['cache_bust']);
+        $warm_cache = !empty($config['warm_cache']);
+
+        // --cache-bust wins the label when both are set. The orchestrator already
+        // warns that warming is pointless alongside it, and the run does measure
+        // origin cost, so calling it anything else would be the bigger lie.
+        if ($cache_bust) {
+            return [
+                'id' => 'origin-cost',
+                'label' => 'Origin cost (sequential, cache-busted)',
+                'measures' => 'What one uncached request costs the origin, one request at a time.',
+                'sizing' => 'Throughput from this run is the Phase 4 sizing input.',
+                'sizing_ok' => true,
+            ];
+        }
+
+        if ($warm_cache) {
+            return [
+                'id' => 'cache-effectiveness',
+                'label' => 'Cache effectiveness (sequential, warmed)',
+                'measures' => 'What the cache serves once the URL is warm.',
+                'sizing' => 'Not a sizing input. Compare it against a --cache-bust run to see '
+                    . 'what the cache is buying the customer.',
+                'sizing_ok' => false,
+            ];
+        }
+
+        return [
+            'id' => 'uncontrolled',
+            'label' => 'Sequential, cache state not controlled',
+            'measures' => 'A mix. Some requests may be served from cache and some not, '
+                . 'and the split is not recorded.',
+            'sizing' => 'Neither origin cost nor cache effectiveness. Add --cache-bust for '
+                . 'sizing, or --warm-cache to measure the cache.',
+            'sizing_ok' => false,
+        ];
+    }
+
+    /**
+     * Announce the mode before the run starts, so the operator sees what is
+     * being measured while it happens rather than only in the summary.
+     *
+     * @param array{label: string, measures: string, sizing: string, sizing_ok: bool} $mode
+     */
+    public static function announce(array $mode): void {
+        MicroChaos_Log::log("🧪 Test mode: {$mode['label']}");
+        MicroChaos_Log::log("   Measures: {$mode['measures']}");
+
+        if ($mode['sizing_ok']) {
+            MicroChaos_Log::log("   Sizing:   {$mode['sizing']}");
+            return;
+        }
+
+        MicroChaos_Log::warning("   Sizing:   {$mode['sizing']}");
+    }
+
+    /**
+     * The one-line form carried in the summary block.
+     *
+     * @param array{label: string, sizing: string} $mode
+     * @return string
+     */
+    public static function summary_line(array $mode): string {
+        return "{$mode['label']} — {$mode['sizing']}";
+    }
+}
+
 interface MicroChaos_Logger_Interface {
 
     /**
@@ -2777,6 +2866,15 @@ class MicroChaos_Reporting_Engine {
             MicroChaos_Log::log("📊 Load Test Summary");
             MicroChaos_Log::log("   ═══════════════════════════════════════════════════");
 
+            // The summary is what gets pasted into an audit, so it names the mode
+            // it measured. Without it, three runs produce three near-identical
+            // blocks and only the operator's memory says which is the sizing one.
+            if (!empty($execution_metrics['mode'])) {
+                MicroChaos_Log::log("   Mode: {$execution_metrics['mode']['label']}");
+                MicroChaos_Log::log("     {$execution_metrics['mode']['sizing']}");
+                MicroChaos_Log::log("   ───────────────────────────────────────────────────");
+            }
+
             // Test Execution Metrics section
             if ($execution_metrics) {
                 MicroChaos_Log::log("   Test Execution:");
@@ -3101,10 +3199,13 @@ class MicroChaos_LoadTest_Orchestrator {
         // Log test start
         $this->log_test_start($config, $endpoint_list, $integration_logger);
 
-        // Announce the measurement mode: the two modes answer different questions
-        // and the numbers are not comparable, so the log has to say which ran.
-        if ($config['cache_bust']) {
-            MicroChaos_Log::log("🚫 Cache busting enabled — every request gets a unique URL, so this measures origin cost, not cache performance.");
+        // Announce the measurement mode: the modes answer different questions and
+        // their numbers are not interchangeable, so the log has to say which ran.
+        // Fan-out children are skipped, because the parent labels the ensemble and
+        // a child announcing itself as a sizing run would contradict it.
+        $mode = MicroChaos_Test_Mode::resolve($config);
+        if (empty($config['worker_id'])) {
+            MicroChaos_Test_Mode::announce($mode);
         }
 
         // Warm cache if specified
@@ -3145,6 +3246,7 @@ class MicroChaos_LoadTest_Orchestrator {
             $loop_result['completed'],
             $reporting_engine->get_results()
         );
+        $execution_metrics['mode'] = $mode;
 
         // Handle baseline comparison
         $perf_baseline = $config['compare_baseline']
@@ -3239,6 +3341,7 @@ class MicroChaos_LoadTest_Orchestrator {
     private function write_results_json(string $path, MicroChaos_Reporting_Engine $reporting_engine, array $loop_result, MicroChaos_Cache_Analyzer $cache_analyzer): void {
         $payload = [
             'worker_id' => $this->config['worker_id'],
+            'mode' => MicroChaos_Test_Mode::resolve($this->config),
             'results' => $reporting_engine->get_results(),
             'completed' => $loop_result['completed'],
             'run_by_duration' => $loop_result['run_by_duration'],
@@ -3854,8 +3957,9 @@ class MicroChaos_Concurrency_Runner {
             );
         }
 
-        MicroChaos_Log::log("🔀 Overlap run: {$n} sequential processes launched together.");
-        MicroChaos_Log::log("   Combined Throughput is not a Phase 4 RPS — size on a sequential --cache-bust run.");
+        $mode = MicroChaos_Test_Mode::resolve(['concurrency' => $n]);
+        MicroChaos_Test_Mode::announce($mode);
+        MicroChaos_Log::log("   Each process runs the sequential test; the overlap is the ensemble.");
 
         if (!empty($config['warm_cache'])) {
             $this->warm_once($config);
@@ -4114,10 +4218,9 @@ class MicroChaos_Concurrency_Runner {
             'duration_formatted' => $this->format_duration($duration),
             'total_requests' => $completed,
             'throughput_rps' => $rps,
+            'mode' => MicroChaos_Test_Mode::resolve(['concurrency' => $n]),
         ];
 
-        MicroChaos_Log::log("📊 Overlap summary ({$n} processes)");
-        MicroChaos_Log::log("   Do not size workers from this Throughput figure.");
         $engine->report_summary(null, null, null, $metrics);
 
         $this->report_merged_cache($payloads, $completed);

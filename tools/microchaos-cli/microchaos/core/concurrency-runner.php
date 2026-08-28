@@ -132,8 +132,9 @@ class MicroChaos_Concurrency_Runner {
             );
         }
 
-        MicroChaos_Log::log("🔀 Overlap run: {$n} sequential processes launched together.");
-        MicroChaos_Log::log("   Combined Throughput is not a Phase 4 RPS — size on a sequential --cache-bust run.");
+        $mode = MicroChaos_Test_Mode::resolve(['concurrency' => $n]);
+        MicroChaos_Test_Mode::announce($mode);
+        MicroChaos_Log::log("   Each process runs the sequential test; the overlap is the ensemble.");
 
         if (!empty($config['warm_cache'])) {
             $this->warm_once($config);
@@ -392,10 +393,9 @@ class MicroChaos_Concurrency_Runner {
             'duration_formatted' => $this->format_duration($duration),
             'total_requests' => $completed,
             'throughput_rps' => $rps,
+            'mode' => MicroChaos_Test_Mode::resolve(['concurrency' => $n]),
         ];
 
-        MicroChaos_Log::log("📊 Overlap summary ({$n} processes)");
-        MicroChaos_Log::log("   Do not size workers from this Throughput figure.");
         $engine->report_summary(null, null, null, $metrics);
 
         $this->report_merged_cache($payloads, $completed);

@@ -228,6 +228,15 @@ class MicroChaos_Reporting_Engine {
             MicroChaos_Log::log("📊 Load Test Summary");
             MicroChaos_Log::log("   ═══════════════════════════════════════════════════");
 
+            // The summary is what gets pasted into an audit, so it names the mode
+            // it measured. Without it, three runs produce three near-identical
+            // blocks and only the operator's memory says which is the sizing one.
+            if (!empty($execution_metrics['mode'])) {
+                MicroChaos_Log::log("   Mode: {$execution_metrics['mode']['label']}");
+                MicroChaos_Log::log("     {$execution_metrics['mode']['sizing']}");
+                MicroChaos_Log::log("   ───────────────────────────────────────────────────");
+            }
+
             // Test Execution Metrics section
             if ($execution_metrics) {
                 MicroChaos_Log::log("   Test Execution:");

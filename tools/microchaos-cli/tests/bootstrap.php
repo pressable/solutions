@@ -85,6 +85,9 @@ function wp_generate_uuid4(): string {
 // Core constants (other components may reference these)
 require_once MICROCHAOS_CORE_PATH . '/constants.php';
 
+// Test-mode descriptor: pure config-to-label mapping, no runtime needed.
+require_once MICROCHAOS_CORE_PATH . '/test-mode.php';
+
 // Interfaces (load before implementations)
 require_once MICROCHAOS_CORE_PATH . '/interfaces/logger.php';
 require_once MICROCHAOS_CORE_PATH . '/interfaces/baseline-storage.php';
